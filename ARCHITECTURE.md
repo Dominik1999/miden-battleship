@@ -1,162 +1,197 @@
-# Miden Battleship — Architecture & Integration Plan
+# Final Architecture Plan
 
-## Phase 1: Smart Contracts
+## Context
 
-### Account Component: `battleship-account`
+Two-player Battleship on Miden. Each player has a private board, takes turns firing shots, and gets hit/miss feedback. Miden's private account storage plus ZK-proven execution makes the defender's shot resolution trustworthy without revealing the board during play.
 
-Game state stored in a single Miden account component with 7 storage slots:
+## Core Model
 
-| Slot | Type | Contents |
-|------|------|----------|
-| `game_config` | Value | `[grid_size, num_placed, phase, expected_turn]` |
-| `opponent` | Value | `[opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received]` |
-| `board_commitment` | Value | `[h0, h1, h2, h3]` — salted hash of ship placement |
-| `opponent_commitment` | Value | `[h0, h1, h2, h3]` — opponent's board commitment |
-| `game_id` | Value | `[gid0, gid1, gid2, gid3]` — unique game identifier |
-| `reveal_status` | Value | `[my_revealed, opponent_verified, 0, 0]` |
-| `my_board` | StorageMap | Cell states keyed by `(0,0,row,col)` + ship counts keyed by `(1,0,0,ship_id)` |
+- Each match uses two fresh per-match game accounts.
+- Each game account includes the battleship-account component plus an auth component.
+- The board is stored in private StorageMap state; only commitments and note metadata are public.
+- Grid size is fixed at 10x10 for v1.
+- Ships are the classic set: 5, 4, 3, 3, 2 cells, 17 total.
+- Ship occupancy is immutable after setup. Gameplay only changes cell markers from ship/water to hit/miss.
 
-**Game phases**: `CREATED(0) → CHALLENGED(1) → ACTIVE(2) → REVEAL(3) → COMPLETE(4)`
+## Board Commitment
 
-**Cell states**: `WATER(0), SHIP_1..5(1-5), HIT(6), MISS(7)`
+- Commitment format: `H(game_id || player_id || salt || canonical_board)`.
+- `salt` is 4 felts, generated client-side and kept local until reveal.
+- `canonical_board` is the list of 17 ship cells sorted by (row, col) and encoded as `(row, col, ship_id)`.
 
-### Note Scripts
+## Transaction Model
 
-| Note | Direction | Purpose |
-|------|-----------|---------|
-| `setup-note` | Self-consume | Places 17 ship cells + calls `finalize_setup` |
-| `challenge-note` | Challenger → Acceptor | Calls `accept_challenge` on acceptor's account |
-| `accept-note` | Acceptor → Challenger | Calls `receive_acceptance` on challenger's account |
-| `shot-note` | Attacker → Defender | Calls `process_shot`, creates `result-note` as output |
-| `result-note` | Created by shot-note | Carries hit/miss result back to shooter |
-| `reveal-note` | Player → Opponent | Calls `verify_opponent_reveal` |
-| `action-note` | Test only | Dispatcher for testing individual methods |
-| `shot-test-note` | Test only | Minimal shot processor (no output note creation) |
+- Miden transactions are single-account. Cross-player interaction is note-based.
+- Setup uses one batched transaction on the player's own account:
+  - `place_ship(...)` repeated for all ship cells
+  - `finalize_setup(...)` once at the end
+- Active play uses 2 transactions per shot cycle:
+  - Shooter creates a private shot-note via Note Transport.
+  - Defender consumes the shot-note, runs `process_shot(...)`, and creates a public result-note.
+- Game end adds extra transactions:
+  - winner calls `enter_reveal()`
+  - each player sends a reveal-note
+  - each player consumes the opponent's reveal-note
+- Clients must serialize transactions per account with a queue/lock to avoid nonce races.
 
-### Game Flow
+## Notes
 
-```
-  Player A (Challenger)                    Player B (Acceptor)
-  ───────────────────                      ───────────────────
-  1. Place ships → finalize_setup()        1. Place ships → finalize_setup()
-     phase: CREATED → CHALLENGED              phase: CREATED → CHALLENGED
+### challenge-note
+- Public
+- Sent by challenger to acceptor
+- Carries target account, challenger account, game_id, grid params, challenger commitment
+- Enforces target account with P2ID-style check
+- Validates sender metadata against challenger identity
 
-  2. Send challenge-note ──────────────►   3. accept_challenge()
-                                              phase: CHALLENGED → ACTIVE
+### accept-note
+- Public
+- Sent by acceptor to challenger
+- Carries target account, acceptor account, game_id, acceptor commitment
+- Enforces target account with P2ID-style check
+- Validates sender metadata against acceptor identity
 
-                                           4. Send accept-note ──────────────►
-  5. receive_acceptance()
-     phase: CHALLENGED → ACTIVE
+### shot-note
+- Private
+- Delivered via Note Transport
+- Carries game_id, target account, row, col, turn_number, result-note recipient data, shooter identity/tag
+- Enforces target account with P2ID-style check
 
-  ─── Gameplay Loop (alternating turns) ───
+### result-note
+- Public
+- Created inside the defender's shot-note consumption transaction
+- Carries game_id, target shooter account, turn_number, result, game_over
+- Does not carry row or col
+- Enforces target account with P2ID-style check
+- Trusted by the shooter only if sender metadata matches the stored opponent
 
-  6. Send shot-note ───────────────────►   7. process_shot() → hit/miss
-                                              creates result-note
+### reveal-note
+- Public
+- Carries target account, game_id, revealer identity, salt, and the full 17 ship cells
+- Enforces target account with P2ID-style check
+- Validates sender metadata against the stored opponent
 
-  8. Read result-note ◄────────────────
+## Public Note Security
 
-  ... alternate until 17 ship cells hit ...
+- `NoteTag` is for discovery/filtering only, not access control.
+- Every public note uses:
+  - target-account enforcement to stop hostile consumption
+  - sender validation to stop spoofed notes
+- For result-note, spoof protection is primarily client-side because the note script is intentionally minimal.
 
-  ─── Reveal Phase ───
+## Gameplay Rules
 
-  9. enter_reveal() / mark_my_reveal()     9. verify_opponent_reveal()
-     Send reveal-note ─────────────────►
-                                           10. mark_my_reveal()
-  10. verify_opponent_reveal() ◄───────        Send reveal-note
+- Turn ownership is encoded by `expected_turn` in account storage.
+- Challenger A fires first.
+- Acceptor B starts with expected incoming turn 1.
+- Challenger A starts with expected incoming turn 2.
+- `process_shot(...)` enforces:
+  - `phase == ACTIVE`
+  - `turn == expected_turn`
+  - targeted cell has not already been shot
+- After a valid shot:
+  - result is miss or hit
+  - board cell is updated to `CELL_MISS` or `CELL_HIT`
+  - `total_shots_received` increments
+  - `ships_hit_count` increments on new hits
+  - `expected_turn += 2`
 
-  Both verified → phase: COMPLETE
-```
+## Victory and Reveal
 
-## Phase 2: Contract Integration Tests
+- When `ships_hit_count == 17`, the losing account automatically moves to REVEAL.
+- The result-note includes `game_over = 1`.
+- The winner detects game_over and calls `enter_reveal()` on their own account.
+- Reveal is optional for correctness.
+- The actual game result is final at game_over.
+- REVEAL -> COMPLETE is a post-game transparency ceremony only.
+- If a player never reveals, the game result still stands; the account may remain in REVEAL.
 
-MockChain-based tests validating all game logic:
+## State Machine
 
-- **Unit tests** — Board placement, shot processing, phase transitions
-- **Note lifecycle tests** — setup → challenge → accept → shot → result → reveal
-- **Integration tests** — Full 2-player game flow
-- **Failure tests** — Wrong phase, out of bounds, duplicate shots, invalid ships
+On-chain phases: `CREATED -> CHALLENGED -> ACTIVE -> REVEAL -> COMPLETE`
 
-Local node validation via `validate_local.rs` binary.
+`ABANDONED` is UI-only and never written on-chain.
 
-## Phase 3: Battleship Frontend
+**Challenger flow**:
+1. setup complete → CHALLENGED
+2. consume accept-note → ACTIVE
+3. defend incoming shots during ACTIVE
+4. call `enter_reveal()` after opponent is defeated
+5. consume opponent reveal → COMPLETE if already revealed
 
-### Implementation Steps
+**Acceptor flow**:
+1. setup + consume challenge-note → ACTIVE
+2. defend incoming shots during ACTIVE
+3. auto-enter REVEAL on loss, or call `enter_reveal()` on win
+4. consume opponent reveal → COMPLETE if already revealed
 
-- [x] 1. Create `deploy_testnet.rs` — deploy game accounts on testnet
-- [x] 2. Copy `shot_note.masp`, remove old counter artifacts
-- [x] 3. Types (`src/types/game.ts`) + config (`src/config.ts`)
-- [x] 4. Test fixtures (`src/__tests__/fixtures/battleship.ts`)
-- [x] 5. `useGameState` hook + test
-- [x] 6. `useBoardState` hook + test
-- [x] 7. `useSoundEffects` hook (Web Audio API)
-- [x] 8. `Cell` + `GameBoard` components + tests
-- [x] 9. `GameStatus` component
-- [x] 10. `useFireShot` hook + test
-- [x] 11. `useAutoSync` hook
-- [x] 12. `GamePlay` component + test
-- [x] 13. `GameSelect` component + test
-- [x] 14. `AppContent` rewrite + `App.tsx` update
-- [x] 15. CSS styling (index.css + component CSS)
-- [x] 16. Verification (typecheck + tests + browser)
+## Account Storage
 
-### Results
+| Slot | Contents |
+|------|----------|
+| `game_config` | `[grid_size, num_ships, phase, expected_turn]` |
+| `opponent` | `[opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received]` |
+| `board_commitment` | Salted hash of ship placement |
+| `opponent_commitment` | Opponent's board commitment |
+| `game_id` | Unique game identifier |
+| `reveal_status` | `[my_revealed, opponent_verified, 0, 0]` |
+| `my_board[(row,col)]` | `0` water, `1..5` ship_id, `6` hit, `7` miss |
 
-- TypeScript: compiles clean (`npx tsc -b --noEmit`)
-- Tests: 38 passed, 10 test files (`npx vitest --run`)
-- Old counter code removed, shot_note.masp copied
+## Core Component Methods
 
-### Pending (requires testnet deployment)
+- `place_ship(row, col, ship_id)`
+- `finalize_setup(game_id, opponent_prefix, opponent_suffix, salt)`
+- `accept_challenge(game_id, opponent_prefix, opponent_suffix, opponent_commitment)`
+- `receive_acceptance(game_id, opponent_prefix, opponent_suffix, opponent_commitment)`
+- `process_shot(row, col, turn) -> encoded_result`
+- `enter_reveal()`
+- `mark_my_reveal()`
+- `verify_opponent_board(game_id, player_id, salt, board_data)`
+- getters such as `get_cell()` and `get_game_phase()`
 
-- Run `deploy_testnet.rs` to get real game account addresses
-- Update `config.ts` with deployed addresses and result_script_root
-- Browser verification with Playwright MCP
+## Anti-Cheat Model
 
-## Lessons Learned
+- **Layer 1**: setup validation runs in ZK, so invalid ship placement cannot be committed.
+- **Layer 2**: shot resolution and result-note creation happen in the same ZK-proven defender transaction, so hits/misses cannot be faked.
+- **Layer 3**: reveal proves the committed board matches the actual ship layout, but this is for transparency, not correctness.
+- Refusal to reveal is a social/UX issue only, not a correctness failure.
 
-### Miden SDK: Note scripts with branching and return values
+## Persistence and Recovery
 
-**Problem**: When a `#[note_script]` has if/else branches where one branch calls a component method returning a `Felt` and other branches call void methods, the Miden WASM-to-MASM compiler generates invalid code. The transaction fails with `assertion failed at clock cycle N with error code: 0`.
+Network sync can recover:
+- account existence
+- nonce
+- public note data
+- note consumption/nullifier state
 
-**Root cause**: Mismatched stack effects across if/else branches in compiled MASM.
+Network sync **cannot** recover:
+- private board state
+- salt
+- local turn-to-coordinate mapping
+- pending private shot-notes
 
-**Fix**: Use separate dedicated note scripts for methods that return values (e.g., `process_shot` → `shot-test-note`). Do NOT mix returning and void method calls in the same if/else dispatcher note.
+CLI and web clients must persist full local game state. Export/backup is required for device-loss recovery.
 
-### Miden SDK: CLI cargo-miden v0.4.0 broken with nightly-2025-12-10
+## Frontend Model
 
-The CLI `cargo miden build` panics with `panic_immediate_abort is now a real panic strategy!`. Use the cargo-miden library v0.7 (`build_project_in_dir()`) instead. The build hook fires on every contract edit and fails — this is ignorable.
+- **Pages**: Lobby, Setup, Play, Game Over
+- **Main flows**:
+  - create/join game
+  - place ships
+  - send private shot-note
+  - consume incoming shot-note
+  - discover public result-note and update local UI
+  - reveal board after game end
+- Auto-processing is supported where the signer allows silent/background transactions.
+- If the wallet requires approval per transaction, web falls back to manual "Process shot".
 
-### MockChain: Notes must be added before build()
+## Account Lifecycle
 
-`MockChainBuilder.add_output_note()` must be called BEFORE `builder.build()`. There is no `mock_chain.add_output_note()` method on the built MockChain.
+- Accounts are per-match and single-game.
+- After completion, they are simply abandoned.
+- No multi-game storage layout is needed for v1.
 
-### Miden SDK: Felt::new() vs Felt::from_u64_unchecked()
+## Key Technical Risk Gates
 
-In contract code (`#![no_std]`), `Felt::new(x)` returns `Result<Felt, FeltError>` — use `Felt::from_u64_unchecked(x)` for runtime values and `felt!(N)` for compile-time constants. In test code (std), `Felt::new(x)` returns `Felt` directly.
-
-### MockChain: output_note::create requires extend_expected_output_notes
-
-When a note script calls `output_note::create()` to create an output note, the transaction kernel needs the full NoteScript details in the advice provider. Pre-construct the expected output note and pass it via `build_tx_context(...).extend_expected_output_notes(vec![OutputNote::Full(expected_note)])`. The sender in NoteMetadata is the executing account (defender), not the original note sender.
-
-### MockChain: Unique seeds for multi-account tests
-
-`create_testing_account_from_package` uses hardcoded seed `[3u8; 32]`. Two accounts with the same component and storage get the same AccountId. Use `AccountBuilder::new(unique_seed)` directly.
-
-### MockChain: create_testing_note_from_package uses zero serial numbers
-
-`create_testing_note_from_package()` uses `[0u64; 4]` as the serial number. Two notes with the same script and inputs will collide. Differentiate notes by adding unique inputs or using different scripts.
-
-### Real Node: expected_output_recipients replaces extend_expected_output_notes
-
-On MockChain, use `extend_expected_output_notes(vec![OutputNote::Full(note)])`. On a real node with `TransactionRequestBuilder`, use `expected_output_recipients(vec![NoteRecipient])` instead.
-
-### Real Node: Binary working directory vs test working directory
-
-Tests run from `integration/` so contract paths use `../contracts/<name>`. Binaries run from workspace root (`project-template/`) so they need `contracts/<name>`.
-
-### Real Node: Accounts need AuthFalcon512Rpo (not NoAuth)
-
-MockChain tests use `NoAuth` for game accounts. On a real node, accounts need `AuthFalcon512Rpo` auth.
-
-### MockChain: All Value storage slots must be initialized
-
-When creating test accounts, ALL Value storage slots declared in the component must be listed in `storage_slots`, even if they're just defaults. Missing slots cause `StorageSlotNameNotFound` errors.
+1. Validate that a single transaction can batch repeated method calls (`place_ship` x17 + `finalize_setup`).
+2. Validate that `output_note::create()` works from inside a note script for the shot → result flow.
+3. Validate whether the web wallet supports silent/background transaction submission for auto-processing.
