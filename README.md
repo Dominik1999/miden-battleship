@@ -1,88 +1,76 @@
-# Miden Agentic Template
+# Miden Battleship
 
-A full-stack Miden development workspace combining smart contract development (Rust SDK) with a web frontend (React + @miden-sdk/react). Both templates are included as git submodules.
+A fully on-chain Battleship game built on [Miden](https://0xmiden.com/) — a zero-knowledge rollup. Ship placements are private (committed as hashes), shots and results are exchanged as Miden notes, and board integrity is verified via ZK proofs at game end.
 
-## Getting Started
+## Prerequisites
 
-### Prerequisites
+- [Node.js](https://nodejs.org/) v18+
+- [Yarn](https://yarnpkg.com/) v1
+- [Rust](https://rustup.rs/) stable toolchain (only for contract development)
+- [midenup](https://github.com/0xMiden/midenup) toolchain (only for contract development)
 
-- [Rust](https://rustup.rs/) (stable toolchain)
-- [midenup](https://github.com/0xMiden/midenup) toolchain (provides `cargo-miden`)
-- [Node.js](https://nodejs.org/) (v18+)
-- [Yarn](https://yarnpkg.com/) (v1)
-
-### Clone
+## Quick Start (Frontend)
 
 ```bash
-git clone --recurse-submodules https://github.com/0xMiden/agentic-template.git
-cd agentic-template
+cd frontend-template
+yarn install
+yarn dev
 ```
 
-If you already cloned without `--recurse-submodules`:
+Open [http://localhost:5173](http://localhost:5173) in your browser. You'll need the [MidenFi wallet extension](https://chromewebstore.google.com/detail/midenfi/okgfhmbifkhgpfnlojkhapbjbamalggo) installed to connect and play.
+
+## How to Play
+
+1. **Connect wallet** — Click "Connect Wallet" to link your MidenFi wallet
+2. **Place ships** — Arrange your 5 ships (Carrier, Battleship, Cruiser, Submarine, Destroyer) on the 10x10 grid
+3. **Challenge or join** — Create a new game or accept an opponent's challenge
+4. **Take turns** — Fire shots at your opponent's grid; hits and misses are revealed via on-chain notes
+5. **Win** — Sink all 17 of your opponent's ship cells to win. Both boards are revealed and verified at game end.
+
+## Project Structure
+
+```
+miden-battleship/
+├── frontend-template/           # React + TypeScript web UI
+│   ├── src/
+│   │   ├── components/          # GameBoard, ShipPlacement, GamePlay, etc.
+│   │   ├── hooks/               # useGameState, useFireShot, useBoardState, etc.
+│   │   ├── lib/                 # Miden SDK utilities, note helpers
+│   │   └── types/               # Game types and constants
+│   └── public/packages/         # Compiled contract artifacts (.masp)
+│
+└── project-template/            # Miden smart contracts (Rust SDK)
+    ├── contracts/
+    │   ├── battleship-account/  # Main game account component
+    │   ├── setup-note/          # Board placement note
+    │   ├── challenge-note/      # Challenge an opponent
+    │   ├── accept-note/         # Accept a challenge
+    │   ├── shot-note/           # Fire a shot
+    │   ├── result-note/         # Hit/miss result
+    │   └── reveal-note/         # End-game board reveal
+    └── integration/             # Tests and deployment scripts
+```
+
+## Building Contracts
 
 ```bash
-git submodule update --init --recursive
+# Build a single contract
+cargo miden build --manifest-path project-template/contracts/battleship-account/Cargo.toml --release
+
+# Run integration tests
+cd project-template && cargo test -p integration --release
 ```
 
-### Install Dependencies
+## Running Tests
 
 ```bash
-# Frontend dependencies
-cd frontend-template && yarn install && cd ..
+# Frontend tests
+cd frontend-template && npx vitest --run
+
+# Contract integration tests
+cd project-template && cargo test -p integration --release
 ```
 
-Rust dependencies are handled automatically by `cargo`.
+## License
 
-## Structure
-
-```
-agentic-template/
-  project-template/           # Miden smart contracts (Rust SDK)
-    contracts/                 # Account components, note scripts, tx scripts
-    integration/               # Integration tests and deployment scripts
-  frontend-template/           # Miden web frontend (React + TypeScript)
-    src/                       # React components, hooks, tests
-    public/packages/           # Compiled contract artifacts (.masp files)
-```
-
-## Development Workflow
-
-1. **Build contracts** in `project-template/contracts/`
-2. **Test contracts** with `cd project-template && cargo test -p integration --release`
-3. **Copy artifacts** from contract build output to `frontend-template/public/packages/`
-4. **Build frontend** in `frontend-template/src/`
-5. **Run frontend** with `cd frontend-template && yarn dev`
-
-## AI Developer Experience
-
-This template is designed for AI-assisted development. Open Claude Code (or Codex, Cursor) at the repository root and describe what you want to build.
-
-- `CLAUDE.md` at root provides the monorepo overview and workflow
-- Each sub-template has its own `CLAUDE.md` with detailed instructions
-- Skills load automatically when working in either template
-- Hooks verify contract builds and frontend type safety on every edit
-
-### Skills
-
-| Template | Skills |
-|----------|--------|
-| project-template | miden-concepts, rust-sdk-patterns, rust-sdk-pitfalls, rust-sdk-testing-patterns, rust-sdk-source-guide |
-| frontend-template | miden-concepts, react-sdk-patterns, testing-patterns, frontend-pitfalls, vite-wasm-setup, signer-integration, frontend-source-guide |
-
-### Hooks
-
-| Trigger | Action |
-|---------|--------|
-| Edit contract file | Auto-build the modified contract |
-| Edit frontend file | Type check + run affected tests |
-| Task completion | Full verification (all tests + typecheck + build) |
-
-## Updating Submodules
-
-To pull the latest changes from both templates:
-
-```bash
-git submodule update --remote --merge
-git add project-template frontend-template
-git commit -m "Update submodules to latest"
-```
+See [LICENSE](project-template/LICENSE).

@@ -2,6 +2,21 @@
 *.log
 .vscode/
 .idea/
+
+# Local node & dev data
 local-node-data/
-local-keystore/
-local-store.sqlite3
+local-keystore*/
+local-store*.sqlite3
+local-accounts/
+keystore/
+store.sqlite3
+*.sqlite3
+
+# Playwright artifacts
+.playwright-mcp/
+
+# Build artifacts
+project-template/target/
+project-template/contracts/*/target/
+frontend-template/node_modules/
+frontend-template/dist/
