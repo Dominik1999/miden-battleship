@@ -1,0 +1,56 @@
+.game-title {
+  font-size: 2.4em;
+  margin-bottom: 0.5rem;
+  letter-spacing: 0.05em;
+}
+
+.wallet-section {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+
+.loading {
+  padding: 2rem;
+  color: #888;
+}
+
+.footer-info {
+  color: #888;
+  font-size: 0.85em;
+  margin-top: 2rem;
+}
+
+.error {
+  color: #ff4444;
+  word-break: break-word;
+}
+
+.skip-link {
+  text-align: center;
+  margin-top: 0.5rem;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: #6af;
+  cursor: pointer;
+  text-decoration: underline;
+  font-size: 0.9em;
+  padding: 0;
+}
+
+.link-btn:hover {
+  color: #8cf;
+}
+
+.deploy-status {
+  text-align: center;
+  padding: 2rem;
+}
+
+.deploy-message {
+  font-size: 1.2em;
+  margin-bottom: 0.5rem;
+}

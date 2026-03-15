@@ -1,0 +1,74 @@
+.game-play {
+  padding: 1rem;
+}
+
+.game-loading {
+  padding: 2rem;
+  color: #888;
+}
+
+.boards-container {
+  display: flex;
+  justify-content: center;
+  gap: 2rem;
+  flex-wrap: wrap;
+  margin: 1rem 0;
+}
+
+.warning {
+  color: #fa0;
+  font-size: 0.9em;
+  margin-top: 1rem;
+}
+
+.error {
+  color: #ff4444;
+  font-size: 0.9em;
+  margin-top: 0.5rem;
+  word-break: break-word;
+}
+
+.busy-indicator {
+  margin-top: 1rem;
+  color: #888;
+  font-size: 0.9em;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}
+
+.music-controls {
+  position: fixed;
+  bottom: 1rem;
+  right: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background: rgba(20, 25, 40, 0.85);
+  padding: 0.4rem 0.6rem;
+  border-radius: 8px;
+  border: 1px solid #334;
+  z-index: 100;
+}
+
+.music-toggle {
+  background: none;
+  border: none;
+  font-size: 1.4em;
+  cursor: pointer;
+  color: #aab;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: color 0.2s;
+}
+.music-toggle:hover {
+  color: #fff;
+}
+
+.music-volume {
+  width: 80px;
+  accent-color: #6af;
+}

@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/project-template/.claude/hooks/build-contracts.sh",
+            "timeout": 300,
+            "statusMessage": "Building modified contracts..."
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/frontend-typecheck.sh",
+            "timeout": 60,
+            "statusMessage": "Type checking modified files..."
+          },
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/frontend-tests.sh",
+            "timeout": 120,
+            "statusMessage": "Running affected tests..."
+          }
+        ]
+      }
+    ],
+    "Stop": []
+  }
+}

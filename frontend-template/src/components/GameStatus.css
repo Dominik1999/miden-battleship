@@ -1,0 +1,56 @@
+.game-status {
+  margin: 1rem 0;
+  padding: 1rem;
+}
+
+.status-message {
+  font-size: 1.4em;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+}
+
+.status-message.my-turn {
+  color: #4f4;
+}
+
+.status-message.waiting {
+  color: #fa0;
+}
+
+.status-message.victory {
+  color: #4f4;
+  font-size: 2em;
+  text-shadow: 0 0 10px #4f4;
+}
+
+.status-message.defeat {
+  color: #f44;
+  font-size: 2em;
+  text-shadow: 0 0 10px #f44;
+}
+
+.status-stats {
+  display: flex;
+  gap: 2rem;
+  justify-content: center;
+  font-size: 1em;
+  color: #aaa;
+}
+
+.stat strong {
+  color: #fff;
+}
+
+.sync-indicator {
+  margin-top: 0.5rem;
+  font-size: 0.8em;
+  color: #888;
+  animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 1; }
+}

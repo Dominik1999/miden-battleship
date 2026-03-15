@@ -1,0 +1,61 @@
+.wallet-btn {
+  padding: 0.6rem 1.2rem;
+  border-radius: 20px;
+  border: 1px solid #334;
+  background: #1a2a4a;
+  color: #fff;
+  font-size: 0.95em;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.wallet-btn:hover {
+  background: #2a3a5a;
+  border-color: #6af;
+}
+
+.wallet-btn.connecting {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.wallet-btn.connected {
+  background: #1a3a2a;
+  border-color: #4a7;
+}
+
+.wallet-btn.connected:hover {
+  background: #2a4a3a;
+}
+
+.wallet-dropdown {
+  position: relative;
+  display: inline-block;
+}
+
+.wallet-menu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  margin-top: 0.3rem;
+  padding: 0;
+  list-style: none;
+  background: #1a1a2e;
+  border: 1px solid #334;
+  border-radius: 8px;
+  overflow: hidden;
+  z-index: 50;
+  min-width: 140px;
+}
+
+.wallet-menu li {
+  padding: 0.5rem 0.8rem;
+  cursor: pointer;
+  font-size: 0.85em;
+  color: #ccc;
+}
+
+.wallet-menu li:hover {
+  background: #2a2a4a;
+  color: #fff;
+}

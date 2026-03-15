@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Minimal Repro: WebClient expected_output_recipients Failure</title>
+  <style>
+    body { font-family: monospace; max-width: 800px; margin: 2rem auto; }
+    pre { background: #f4f4f4; padding: 1rem; overflow-x: auto; }
+    .error { color: red; }
+    .success { color: green; }
+    #log { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>WebClient <code>expected_output_recipients</code> Bug Repro</h1>
+
+  <h2>What this demonstrates</h2>
+  <p>
+    When a note script calls <code>output_note::create()</code>, the kernel needs the
+    output note's script pre-loaded in the DataStore. The Rust client's
+    <code>TransactionRequestBuilder::expected_output_recipients()</code> handles this correctly.
+    The WebClient's <code>withExpectedOutputRecipients()</code> does not — the kernel fails
+    with <code>NOTE_BEFORE_CREATED</code> event error (ID: 1276704095326615571).
+  </p>
+
+  <h2>Prerequisites</h2>
+  <ol>
+    <li>A Miden testnet account with the battleship component deployed</li>
+    <li>A shot note published to that account (created by the opponent)</li>
+    <li>The <code>result_note.masp</code> package file available at <code>/packages/result_note.masp</code></li>
+  </ol>
+
+  <h2>How to reproduce (conceptual)</h2>
+  <pre>
+// 1. Initialize WebClient
+const client = new WebClient();
+await client.initialize(/* rpcUrl, prover */);
+
+// 2. Load the output note script from .masp
+const maspBytes = await fetch("/packages/result_note.masp").then(r => r.arrayBuffer());
+const pkg = Package.deserialize(new Uint8Array(maspBytes));
+const resultScript = NoteScript.fromPackage(pkg);
+
+// 3. Get the input note (shot note that calls output_note::create())
+const noteRecord = await client.getInputNote(noteId);
+const note = noteRecord.toNote();
+
+// 4. Build transaction request with expected output recipients
+const noteAndArgs = new NoteAndArgs(note);
+const noteAndArgsArray = new NoteAndArgsArray([noteAndArgs]);
+
+const dummyInputs = new NoteInputs(new FeltArray());
+const recipient = new NoteRecipient(serialNum, resultScript, dummyInputs);
+const recipientArray = new NoteRecipientArray([recipient]);
+
+const txRequest = new TransactionRequestBuilder()
+  .withInputNotes(noteAndArgsArray)
+  .withExpectedOutputRecipients(recipientArray)  // &lt;-- This should pre-load the script
+  .build();
+
+// 5. Execute — FAILS with NOTE_BEFORE_CREATED
+const txResult = await client.executeTransaction(accountId, txRequest);
+// Error: "error during processing of event with ID: 1276704095326615571"
+  </pre>
+
+  <h2>Expected behavior</h2>
+  <p>
+    <code>executeTransaction</code> succeeds (as it does with the native Rust client).
+    The kernel finds the result note's script via the DataStore and creates the output note.
+  </p>
+
+  <h2>Actual behavior</h2>
+  <p class="error">
+    Kernel fails at the <code>NOTE_BEFORE_CREATED</code> event (ID: 1276704095326615571).
+    The script is not found in the DataStore despite being provided via
+    <code>withExpectedOutputRecipients()</code>.
+  </p>
+
+  <h2>Evidence that script roots match</h2>
+  <pre>
+Result script root from .masp: [15171288892435243614, 10295758693372466955, 709059778587687919, 9826546822224790371]
+RESULT_SCRIPT_ROOT from config: [15171288892435243614, 10295758693372466955, 709059778587687919, 9826546822224790371]
+Roots match: true
+
+Shot note's result_script_root (inputs[7..10]): [15171288892435243614, 10295758693372466955, 709059778587687919, 9826546822224790371]
+Shot inputs match config: true
+  </pre>
+
+  <h2>Working Rust equivalent</h2>
+  <pre>
+let request = TransactionRequestBuilder::new()
+    .input_notes([(shot_note, None)])
+    .expected_output_recipients(vec![result_recipient])
+    .build()?;
+client.submit_new_transaction(account_id, request).await?;
+// SUCCESS — kernel creates the output note
+  </pre>
+
+  <h2>Contract sources</h2>
+  <ul>
+    <li><strong>Shot note</strong> (calls <code>output_note::create()</code>): <code>project-template/contracts/shot-note/src/lib.rs</code></li>
+    <li><strong>Result note</strong> (output note script): <code>project-template/contracts/result-note/src/lib.rs</code></li>
+  </ul>
+
+  <h2>SDK Versions</h2>
+  <ul>
+    <li>@miden-sdk/miden-sdk: 0.13.2</li>
+    <li>@miden-sdk/react: 0.13.3</li>
+    <li>@miden-sdk/miden-wallet-adapter: 0.13.5</li>
+    <li>@miden-sdk/vite-plugin: 0.13.4</li>
+  </ul>
+</body>
+</html>

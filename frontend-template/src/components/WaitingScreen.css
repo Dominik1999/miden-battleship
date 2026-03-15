@@ -1,0 +1,111 @@
+.waiting-screen {
+  max-width: 520px;
+  margin: 2rem auto;
+  text-align: center;
+  padding: 2rem;
+}
+
+.waiting-screen h2 {
+  margin-bottom: 1.5rem;
+}
+
+.game-id-display {
+  margin-bottom: 1.5rem;
+  text-align: left;
+}
+
+.game-id-display label {
+  display: block;
+  font-size: 0.85em;
+  color: #aaa;
+  margin-bottom: 0.4rem;
+}
+
+.game-id-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.game-id-value {
+  flex: 1;
+  padding: 0.6em 0.8em;
+  font-size: 0.85em;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  word-break: break-all;
+  color: #ccc;
+}
+
+.copy-btn {
+  padding: 0.6em 1.2em;
+  font-size: 0.85em;
+  background: #333;
+  border: 1px solid #555;
+  border-radius: 4px;
+  color: #ccc;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.copy-btn:hover {
+  background: #444;
+  border-color: #666;
+}
+
+.waiting-status {
+  font-size: 1.1em;
+  color: #aaa;
+  margin-bottom: 1rem;
+}
+
+.waiting-spinner {
+  width: 32px;
+  height: 32px;
+  margin: 1rem auto;
+  border: 3px solid #333;
+  border-top-color: #6af;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.consume-section {
+  margin-top: 1.5rem;
+  padding: 1rem;
+  background: #1a2a1a;
+  border: 1px solid #4a4;
+  border-radius: 6px;
+}
+
+.consume-info {
+  color: #8c8;
+  margin-bottom: 0.75rem;
+  font-size: 0.95em;
+}
+
+.consume-btn {
+  padding: 0.6em 1.5em;
+  font-size: 0.95em;
+  background: #2a5a2a;
+  border: 1px solid #4a4;
+  border-radius: 4px;
+  color: #cfc;
+  cursor: pointer;
+}
+
+.consume-btn:hover:not(:disabled) {
+  background: #3a6a3a;
+  border-color: #5b5;
+}
+
+.consume-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
