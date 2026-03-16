@@ -83,8 +83,10 @@ export function useGameplaySync(
           throw new Error("Cannot access raw WASM WebClient");
         }
 
-        // Sync from network (raw WASM — no note screener popups)
-        await wasmClient.syncState();
+        // Sync from network via the wrapper's syncState (handles locking).
+        // We use the client wrapper (not wasmClient) because syncState()
+        // is defined in JS with Web Locks coordination.
+        await client.syncState();
 
         // Get all input notes for this account
         const allNotes = await wasmClient.getInputNotes(0); // 0 = Committed status
