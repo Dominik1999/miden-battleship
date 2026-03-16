@@ -83,10 +83,10 @@ export function useGameplaySync(
           throw new Error("Cannot access raw WASM WebClient");
         }
 
-        // Sync from network via the wrapper's syncState (handles locking).
-        // We use the client wrapper (not wasmClient) because syncState()
-        // is defined in JS with Web Locks coordination.
-        await client.syncState();
+        // Sync from network using the raw WASM syncStateImpl().
+        // We can't use client.syncState() inside runExclusive (lock conflict),
+        // and the SDK's sync() hook triggers note screener wallet popups.
+        await wasmClient.syncStateImpl();
 
         // Get all input notes for this account
         const allNotes = await wasmClient.getInputNotes(0); // 0 = Committed status
