@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import { useMidenClient, useMiden } from "@miden-sdk/react";
+import { useMidenClient, useMiden, useNotes, useSyncState, useConsume, useTransaction } from "@miden-sdk/react";
 import {
   TransactionRequestBuilder,
   NoteAndArgs,
@@ -32,18 +32,23 @@ let preGameNoteIds: Set<string> | null = null;
  * Syncs from the network and auto-consumes incoming notes (opponent shots
  * and result notes) on the player's own game account during gameplay.
  *
- * Uses the raw WASM WebClient directly for sync and consumption to avoid
- * the wallet adapter's note screener popups. The game account's auth is
- * handled internally by the WASM client (key stored in IndexedDB), so
- * wallet signing is not needed.
+ * Shot-notes (14 inputs) create output result-notes, so we use useTransaction
+ * with withExpectedOutputRecipients(). Result-notes (4 inputs) are simple
+ * consumes with no output notes, so we use useConsume.
  */
 export function useGameplaySync(
   myAccountId: string,
   enabled: boolean,
   refetchState: () => void,
 ) {
+  const { sync } = useSyncState();
   const client = useMidenClient();
-  const { runExclusive, prover } = useMiden();
+  const { runExclusive } = useMiden();
+  const { notes: allNotes, refetch: refetchNotes } = useNotes(
+    myAccountId ? { accountId: myAccountId } : undefined,
+  );
+  const { consume } = useConsume();
+  const { execute } = useTransaction();
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const busyRef = useRef(false);
@@ -226,7 +231,8 @@ export function useGameplaySync(
     if (busyRef.current) return;
     busyRef.current = true;
     try {
-      const accountIdObj = AccountId.fromBech32(myAccountId);
+      await sync();
+      refetchNotes();
 
       const notes = notesRef.current ?? [];
       const pending = notes.filter(
