@@ -40,7 +40,7 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
     useFireShot(opponentAccount, refetchAll);
 
   const {
-    playShot, playHit, playMiss, playVictory, playDefeat,
+    playShot, playDefeat,
     startMusic, stopMusic, setMusicVolume, musicPlaying, musicVolume,
   } = useSoundEffects();
 
