@@ -264,8 +264,9 @@ export function useJoinGame() {
       !consumedNoteIds.current.has(n.id().toString()),
   );
 
-  // Manual consume function exposed to UI — uses allNotes since SDK can't
-  // auto-determine consumability for custom note scripts
+  // Consume notes ONE AT A TIME sequentially. The contract requires phase
+  // transitions in order (CREATED→CHALLENGED→ACTIVE), so batching multiple
+  // notes in a single consume() call fails with assertion errors.
   const consumeNotes = useCallback(async () => {
     if (!gameAccountAddress || pendingNotes.length === 0) {
       log("consumeNotes called but nothing to consume");
@@ -273,24 +274,28 @@ export function useJoinGame() {
     }
 
     const noteIds = pendingNotes.map((n) => n.id().toString());
-    log(`=== CONSUMING ${noteIds.length} NOTE(S) ===`);
+    log(`=== CONSUMING ${noteIds.length} NOTE(S) SEQUENTIALLY ===`);
     noteIds.forEach((id, i) => log(`  [${i}] ${id}`));
     log(`Against game account: ${gameAccountAddress}`);
 
-    try {
-      const result = await consume({ accountId: gameAccountAddress, noteIds });
-      log(`Consume succeeded! TX: ${JSON.stringify(result)}`);
-      // Track consumed IDs immediately so button resets before refetch completes
-      noteIds.forEach((id) => consumedNoteIds.current.add(id));
-      log("Syncing and refetching game account state...");
-      await sync();
-      refetchGame();
-      refetchNotes();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log(`Consume FAILED: ${msg}`);
+    for (const noteId of noteIds) {
+      try {
+        log(`Consuming note ${noteId}...`);
+        const result = await consume({ accountId: gameAccountAddress, noteIds: [noteId] });
+        log(`Consume succeeded for ${noteId}: ${JSON.stringify(result)}`);
+        consumedNoteIds.current.add(noteId);
+
+        // Sync between notes so the next consume sees the updated phase
+        log("Syncing between notes...");
+        await sync();
+        refetchGame();
+        refetchNotes();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        log(`Consume FAILED for ${noteId}: ${msg}`);
+      }
     }
-  }, [gameAccountAddress, pendingNotes, consume, refetchGame, refetchNotes]);
+  }, [gameAccountAddress, pendingNotes, consume, sync, refetchGame, refetchNotes]);
 
   // Log storage state changes
   useEffect(() => {
