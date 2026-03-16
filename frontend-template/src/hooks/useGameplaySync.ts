@@ -69,7 +69,7 @@ export function useGameplaySync(
   const loadResultScript = useCallback(async (): Promise<NoteScript> => {
     if (!resultMaspBytesRef.current) {
       log("Fetching result_note.masp...");
-      const buf = await fetch("/packages/result_note.masp").then((r) =>
+      const buf = await fetch(`${import.meta.env.BASE_URL}packages/result_note.masp`).then((r) =>
         r.arrayBuffer(),
       );
       resultMaspBytesRef.current = new Uint8Array(buf);

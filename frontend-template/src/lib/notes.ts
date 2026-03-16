@@ -43,7 +43,7 @@ const NOTE_TAG_NAMES: Record<number, string> = {
 export async function loadPackage(name: string): Promise<Package> {
   log(`Loading package: ${name}`);
   const t0 = performance.now();
-  const buf = await fetch(`/packages/${name}`).then((r) => r.arrayBuffer());
+  const buf = await fetch(`${import.meta.env.BASE_URL}packages/${name}`).then((r) => r.arrayBuffer());
   const pkg = Package.deserialize(new Uint8Array(buf));
   log(
     `Loaded ${name} (${(buf.byteLength / 1024).toFixed(1)} KB) in ${(performance.now() - t0).toFixed(0)}ms`,

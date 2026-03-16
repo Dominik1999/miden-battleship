@@ -61,7 +61,7 @@ export function useFireShot(
 
       try {
         // Load pre-compiled shot-note package
-        const buf = await fetch("/packages/shot_note.masp").then((r) =>
+        const buf = await fetch(`${import.meta.env.BASE_URL}packages/shot_note.masp`).then((r) =>
           r.arrayBuffer(),
         );
         const pkg = Package.deserialize(new Uint8Array(buf));
