@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import { useMidenClient, useMiden } from "@miden-sdk/react";
+import { useMidenClient, useMiden, useNotes, useSyncState } from "@miden-sdk/react";
 import {
   TransactionRequestBuilder,
   NoteAndArgs,
@@ -27,23 +27,35 @@ const log = (msg: string, ...args: unknown[]) =>
  * Syncs from the network and auto-consumes incoming notes (opponent shots
  * and result notes) on the player's own game account during gameplay.
  *
- * Uses the raw WASM WebClient directly for sync and consumption to avoid
- * the wallet adapter's note screener popups. The game account's auth is
- * handled internally by the WASM client (key stored in IndexedDB), so
- * wallet signing is not needed.
+ * Sync and note discovery use the SDK hooks (sync(), useNotes).
+ * Consumption uses the raw WASM WebClient directly to avoid wallet adapter
+ * popups — the game account's auth key is in IndexedDB, not the wallet.
  */
 export function useGameplaySync(
   myAccountId: string,
   enabled: boolean,
   refetchState: () => void,
 ) {
+  const { sync } = useSyncState();
   const client = useMidenClient();
   const { runExclusive, prover } = useMiden();
+  const { notes: allNotes, refetch: refetchNotes } = useNotes(
+    myAccountId ? { accountId: myAccountId } : undefined,
+  );
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const busyRef = useRef(false);
   const handledIds = useRef<Set<string>>(new Set());
+  const preGameIds = useRef<Set<string> | null>(null);
+  const notesRef = useRef(allNotes);
+  notesRef.current = allNotes;
   const resultMaspBytesRef = useRef<Uint8Array | null>(null);
+
+  // Snapshot pre-game notes on first render with data
+  if (preGameIds.current === null && allNotes && allNotes.length > 0) {
+    preGameIds.current = new Set(allNotes.map((n) => n.id().toString()));
+    log(`Snapshotted ${preGameIds.current.size} pre-game note(s)`);
+  }
 
   /** Load .masp bytes (cached) and create a FRESH NoteScript each call */
   const loadResultScript = useCallback(async (): Promise<NoteScript> => {
@@ -61,19 +73,18 @@ export function useGameplaySync(
     const loadedRoot = [rootFelts[0].asInt(), rootFelts[1].asInt(), rootFelts[2].asInt(), rootFelts[3].asInt()];
     const match = loadedRoot.every((v, i) => v === RESULT_SCRIPT_ROOT[i]);
     if (!match) {
-      log("WARNING: Script root mismatch! The kernel will fail to find the script.");
+      log("WARNING: Script root mismatch!");
     }
     return script;
   }, []);
 
   /**
-   * One tick: sync via raw WASM client, find unconsumed notes, consume them.
-   * Everything goes through wasmClient directly — no wallet adapter popups.
+   * Consume a single note via raw WASM WebClient.
+   * Shot-notes (14 inputs): builds correct recipient with predicted result.
+   * Result-notes (4 inputs): simple consume, no output notes.
    */
-  const tick = useCallback(async () => {
-    if (busyRef.current) return;
-    busyRef.current = true;
-    try {
+  const consumeNote = useCallback(
+    async (noteIdStr: string) => {
       const accountIdObj = AccountId.fromBech32(myAccountId);
 
       await runExclusive(async () => {
@@ -83,120 +94,129 @@ export function useGameplaySync(
           throw new Error("Cannot access raw WASM WebClient");
         }
 
-        // Sync from network using the raw WASM syncStateImpl().
-        // We can't use client.syncState() inside runExclusive (lock conflict),
-        // and the SDK's sync() hook triggers note screener wallet popups.
-        await wasmClient.syncStateImpl();
+        const noteRecord = await client.getInputNote(noteIdStr);
+        if (!noteRecord) {
+          throw new Error(`Note ${noteIdStr} not found in local store`);
+        }
 
-        // Get all input notes for this account
-        const allNotes = await wasmClient.getInputNotes(0); // 0 = Committed status
-        const pending = allNotes.filter(
-          (n: { id: () => { toString: () => string } }) =>
-            !handledIds.current.has(n.id().toString()),
-        );
+        const note = noteRecord.toNote();
+        const noteInputs = note.recipient().inputs().values();
+        log(`Note ${noteIdStr}: ${noteInputs.length} inputs, tag=${note.metadata().tag().asU32()}`);
 
-        if (pending.length === 0) {
-          refetchState();
+        const noteAndArgs = new NoteAndArgs(note);
+        const noteAndArgsArray = new NoteAndArgsArray([noteAndArgs]);
+        let txRequest;
+
+        if (noteInputs.length === 14) {
+          // --- SHOT-NOTE: defender consumes, creates result output note ---
+          const resultScript = await loadResultScript();
+
+          const row = noteInputs[0].asInt();
+          const col = noteInputs[1].asInt();
+          const turn = noteInputs[2];
+          const serialNum = Word.newFromFelts([noteInputs[3], noteInputs[4], noteInputs[5], noteInputs[6]]);
+          const shooterPrefix = noteInputs[11];
+          const shooterSuffix = noteInputs[12];
+
+          // Read defender's board cell to predict hit/miss
+          const defenderAccount = await wasmClient.getAccount(accountIdObj);
+          if (!defenderAccount) {
+            throw new Error("Cannot read defender account");
+          }
+          const boardKey = Word.newFromFelts([
+            new Felt(0n), new Felt(0n), new Felt(row), new Felt(col),
+          ]);
+          const cellValue = defenderAccount.storage().getMapItem(SLOT_BOARD, boardKey);
+          const cellState = cellValue ? Number(cellValue.toU64s()[3]) : 0;
+          const isHit = cellState >= 1 && cellState <= 5;
+          const result = isHit ? 1n : 0n;
+
+          const opponentSlot = defenderAccount.storage().getItem(SLOT_OPPONENT);
+          const shipsHitCount = opponentSlot ? Number(opponentSlot.toU64s()[2]) : 0;
+          const newHitCount = isHit ? shipsHitCount + 1 : shipsHitCount;
+          const gameOver = newHitCount >= TOTAL_SHIP_CELLS ? 1n : 0n;
+
+          const encodedResult = new Felt(result * 2n + gameOver);
+          log(`Shot at (${row},${col}): cell=${cellState}, hit=${isHit}, shipsHit=${shipsHitCount}→${newHitCount}, gameOver=${gameOver}`);
+
+          const resultNoteInputs = new FeltArray();
+          resultNoteInputs.push(shooterPrefix);
+          resultNoteInputs.push(shooterSuffix);
+          resultNoteInputs.push(turn);
+          resultNoteInputs.push(encodedResult);
+
+          const correctRecipient = new NoteRecipient(
+            serialNum,
+            resultScript,
+            new NoteInputs(resultNoteInputs),
+          );
+
+          txRequest = new TransactionRequestBuilder()
+            .withInputNotes(noteAndArgsArray)
+            .withExpectedOutputRecipients(new NoteRecipientArray([correctRecipient]))
+            .build();
+        } else if (noteInputs.length === 4) {
+          // --- RESULT-NOTE: shooter consumes to clean up UTXO ---
+          const turn = noteInputs[2].asInt();
+          const encodedResult = noteInputs[3].asInt();
+          log(`Result note: turn=${turn}, result=${encodedResult / 2n === 1n ? "HIT" : "MISS"}, gameOver=${encodedResult % 2n}`);
+
+          txRequest = new TransactionRequestBuilder()
+            .withInputNotes(noteAndArgsArray)
+            .build();
+        } else {
+          log(`Skipping note ${noteIdStr} — unknown type (${noteInputs.length} inputs)`);
           return;
         }
 
-        for (const noteRecord of pending) {
-          const noteIdStr = noteRecord.id().toString();
-          log(`Processing note: ${noteIdStr}`);
+        log(`Executing TX for ${noteIdStr}...`);
+        const txResult = await wasmClient.executeTransaction(accountIdObj, txRequest);
+        log(`TX executed, proving...`);
+        const proven = await wasmClient.proveTransaction(txResult, prover ?? undefined);
+        log(`TX proved, submitting...`);
+        const height = await wasmClient.submitProvenTransaction(proven, txResult);
+        await wasmClient.applyTransaction(txResult, height);
+        log(`Note ${noteIdStr} consumed at height ${height}`);
+      });
+    },
+    [myAccountId, client, runExclusive, prover, loadResultScript],
+  );
+
+  const tick = useCallback(async () => {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    try {
+      // Sync via SDK hook (outside runExclusive)
+      await sync();
+      refetchNotes();
+
+      const notes = notesRef.current ?? [];
+      const pending = notes.filter(
+        (n) =>
+          !n.isConsumed() &&
+          !n.isProcessing() &&
+          n.isAuthenticated() &&
+          !handledIds.current.has(n.id().toString()) &&
+          !(preGameIds.current?.has(n.id().toString()) ?? false),
+      );
+
+      if (pending.length > 0) {
+        for (const note of pending) {
+          const noteId = note.id().toString();
+          log(`Auto-consuming note: ${noteId}`);
           try {
-            const note = noteRecord.toNote();
-            const noteInputs = note.recipient().inputs().values();
-            log(`Note has ${noteInputs.length} inputs`);
-
-            const noteAndArgs = new NoteAndArgs(note);
-            const noteAndArgsArray = new NoteAndArgsArray([noteAndArgs]);
-
-            let txRequest;
-
-            if (noteInputs.length === 14) {
-              // --- SHOT-NOTE: defender consumes, creates result output note ---
-              const resultScript = await loadResultScript();
-
-              const row = noteInputs[0].asInt();
-              const col = noteInputs[1].asInt();
-              const turn = noteInputs[2];
-              const serialNum = Word.newFromFelts([noteInputs[3], noteInputs[4], noteInputs[5], noteInputs[6]]);
-              const shooterPrefix = noteInputs[11];
-              const shooterSuffix = noteInputs[12];
-
-              // Read defender's board cell to predict hit/miss
-              const defenderAccount = await wasmClient.getAccount(accountIdObj);
-              if (!defenderAccount) {
-                throw new Error("Cannot read defender account from local store");
-              }
-              const boardKey = Word.newFromFelts([
-                new Felt(0n), new Felt(0n), new Felt(row), new Felt(col),
-              ]);
-              const cellValue = defenderAccount.storage().getMapItem(SLOT_BOARD, boardKey);
-              const cellState = cellValue ? Number(cellValue.toU64s()[3]) : 0;
-              const isHit = cellState >= 1 && cellState <= 5;
-              const result = isHit ? 1n : 0n;
-
-              const opponentSlot = defenderAccount.storage().getItem(SLOT_OPPONENT);
-              const shipsHitCount = opponentSlot ? Number(opponentSlot.toU64s()[2]) : 0;
-              const newHitCount = isHit ? shipsHitCount + 1 : shipsHitCount;
-              const gameOver = newHitCount >= TOTAL_SHIP_CELLS ? 1n : 0n;
-
-              const encodedResult = new Felt(result * 2n + gameOver);
-              log(`Shot at (${row},${col}): cell=${cellState}, hit=${isHit}, shipsHit=${shipsHitCount}→${newHitCount}, gameOver=${gameOver}, encoded=${result * 2n + gameOver}`);
-
-              const resultNoteInputs = new FeltArray();
-              resultNoteInputs.push(shooterPrefix);
-              resultNoteInputs.push(shooterSuffix);
-              resultNoteInputs.push(turn);
-              resultNoteInputs.push(encodedResult);
-
-              const correctRecipient = new NoteRecipient(
-                serialNum,
-                resultScript,
-                new NoteInputs(resultNoteInputs),
-              );
-
-              txRequest = new TransactionRequestBuilder()
-                .withInputNotes(noteAndArgsArray)
-                .withExpectedOutputRecipients(new NoteRecipientArray([correctRecipient]))
-                .build();
-            } else if (noteInputs.length === 4) {
-              // --- RESULT-NOTE: shooter consumes to clean up UTXO ---
-              const turn = noteInputs[2].asInt();
-              const encodedResult = noteInputs[3].asInt();
-              const shotResult = encodedResult / 2n;
-              const gameOver = encodedResult % 2n;
-              log(`Result note: turn=${turn}, result=${shotResult === 1n ? "HIT" : "MISS"}, gameOver=${gameOver}`);
-
-              txRequest = new TransactionRequestBuilder()
-                .withInputNotes(noteAndArgsArray)
-                .build();
-            } else {
-              log(`Skipping note ${noteIdStr} — unknown type (${noteInputs.length} inputs)`);
-              handledIds.current.add(noteIdStr);
-              continue;
-            }
-
-            log(`Executing TX for note ${noteIdStr}...`);
-            const txResult = await wasmClient.executeTransaction(accountIdObj, txRequest);
-            log(`TX executed, proving...`);
-            const proven = await wasmClient.proveTransaction(txResult, prover ?? undefined);
-            log(`TX proved, submitting...`);
-            const height = await wasmClient.submitProvenTransaction(proven, txResult);
-            log(`TX submitted at height ${height}, applying...`);
-            await wasmClient.applyTransaction(txResult, height);
-            log(`Note ${noteIdStr} consumed successfully`);
-            handledIds.current.add(noteIdStr);
-          } catch (err) {
-            handledIds.current.add(noteIdStr);
-            log(`Consume failed for ${noteIdStr}: ${err instanceof Error ? err.message : String(err)}`);
+            await consumeNote(noteId);
+            handledIds.current.add(noteId);
+            log(`Consumed ${noteId} successfully`);
+          } catch (consumeErr) {
+            handledIds.current.add(noteId);
+            log(`Consume failed for ${noteId}: ${consumeErr instanceof Error ? consumeErr.message : String(consumeErr)}`);
           }
         }
 
-        // Re-sync after consuming
-        await wasmClient.syncState();
-      });
+        await sync();
+        refetchNotes();
+      }
 
       refetchState();
     } catch (err) {
@@ -204,7 +224,7 @@ export function useGameplaySync(
     } finally {
       busyRef.current = false;
     }
-  }, [myAccountId, client, runExclusive, prover, loadResultScript, refetchState]);
+  }, [myAccountId, sync, consumeNote, refetchNotes, refetchState]);
 
   useEffect(() => {
     if (!enabled || !myAccountId) {
