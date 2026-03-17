@@ -8,7 +8,7 @@ export function AppProviders({ children }: { children: ReactNode }) {
   return (
     <MidenFiSignerProvider appName={APP_NAME} autoConnect>
       <MidenProvider
-        config={{ rpcUrl: MIDEN_RPC_URL, prover: MIDEN_PROVER }}
+        config={{ rpcUrl: MIDEN_RPC_URL, prover: MIDEN_PROVER, autoSyncInterval: 0 }}
         loadingComponent={
           <div className="loading">Loading Miden WASM...</div>
         }
