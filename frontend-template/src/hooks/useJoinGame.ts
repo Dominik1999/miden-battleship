@@ -22,6 +22,8 @@ import {
   SLOT_GAME_CONFIG,
   AUTO_SYNC_INTERVAL_MS,
   NETWORK_SYNC_DELAY_MS,
+  CONSUME_MAX_RETRIES,
+  CONSUME_RETRY_DELAY_MS,
 } from "@/config";
 import { PHASE_ACTIVE } from "@/types/game";
 import type { ShipCell } from "@/types/game";
@@ -279,20 +281,33 @@ export function useJoinGame() {
     log(`Against game account: ${gameAccountAddress}`);
 
     for (const noteId of noteIds) {
-      try {
-        log(`Consuming note ${noteId}...`);
-        const result = await consume({ accountId: gameAccountAddress, noteIds: [noteId] });
-        log(`Consume succeeded for ${noteId}: ${JSON.stringify(result)}`);
-        consumedNoteIds.current.add(noteId);
+      let consumed = false;
+      for (let attempt = 1; attempt <= CONSUME_MAX_RETRIES; attempt++) {
+        try {
+          log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Consuming note ${noteId}...`);
+          const result = await consume({ accountId: gameAccountAddress, noteIds: [noteId] });
+          log(`Consume succeeded for ${noteId}: ${JSON.stringify(result)}`);
+          consumedNoteIds.current.add(noteId);
+          consumed = true;
 
-        // Sync between notes so the next consume sees the updated phase
-        log("Syncing between notes...");
-        await sync();
-        refetchGame();
-        refetchNotes();
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`Consume FAILED for ${noteId}: ${msg}`);
+          // Sync between notes so the next consume sees the updated phase
+          log("Syncing between notes...");
+          await sync();
+          refetchGame();
+          refetchNotes();
+          break;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Consume FAILED for ${noteId}: ${msg}`);
+          if (attempt < CONSUME_MAX_RETRIES) {
+            log(`Waiting ${CONSUME_RETRY_DELAY_MS / 1000}s before retry...`);
+            await new Promise((r) => setTimeout(r, CONSUME_RETRY_DELAY_MS));
+            await sync();
+          }
+        }
+      }
+      if (!consumed) {
+        log(`Giving up on note ${noteId} after ${CONSUME_MAX_RETRIES} attempts`);
       }
     }
   }, [gameAccountAddress, pendingNotes, consume, sync, refetchGame, refetchNotes]);

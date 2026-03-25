@@ -22,6 +22,8 @@ import {
   SLOT_OPPONENT,
   AUTO_SYNC_INTERVAL_MS,
   NETWORK_SYNC_DELAY_MS,
+  CONSUME_MAX_RETRIES,
+  CONSUME_RETRY_DELAY_MS,
 } from "@/config";
 import type { ShipCell } from "@/types/game";
 
@@ -301,26 +303,45 @@ export function useStartGame() {
       log(`Setup note ID: ${setupNoteId}`);
 
       // Step 3: Wait for setup note to appear on-chain, then consume it ALONE
-      log(`Waiting ${NETWORK_SYNC_DELAY_MS / 1000}s for setup note to sync...`);
-      await new Promise((r) => setTimeout(r, NETWORK_SYNC_DELAY_MS));
-      await sync();
-
+      // Retry loop: sync + consume, because the note may not be on-chain yet
       log(`=== CONSUMING SETUP NOTE (CREATED → CHALLENGED) ===`);
       log(`  Setup note: ${setupNoteId}`);
-      const setupResult = await consume({ accountId: gameAccountAddress, noteIds: [setupNoteId] });
-      log(`Setup consume succeeded! TX: ${JSON.stringify(setupResult)}`);
-      consumedNoteIds.current.add(setupNoteId);
+      for (let attempt = 1; attempt <= CONSUME_MAX_RETRIES; attempt++) {
+        const delay = attempt === 1 ? NETWORK_SYNC_DELAY_MS : CONSUME_RETRY_DELAY_MS;
+        log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Waiting ${delay / 1000}s then syncing...`);
+        await new Promise((r) => setTimeout(r, delay));
+        await sync();
+        try {
+          const setupResult = await consume({ accountId: gameAccountAddress, noteIds: [setupNoteId] });
+          log(`Setup consume succeeded! TX: ${JSON.stringify(setupResult)}`);
+          consumedNoteIds.current.add(setupNoteId);
+          break;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Setup consume failed: ${msg}`);
+          if (attempt === CONSUME_MAX_RETRIES) throw err;
+        }
+      }
 
       // Step 4: Wait for setup consume to propagate, then consume the challenge note ALONE
-      log(`Waiting ${NETWORK_SYNC_DELAY_MS / 1000}s for setup consume to propagate...`);
-      await new Promise((r) => setTimeout(r, NETWORK_SYNC_DELAY_MS));
-      await sync();
-
       log(`=== CONSUMING CHALLENGE NOTE (CHALLENGED → ACTIVE) ===`);
       log(`  Challenge note: ${challengeNoteId}`);
-      const challengeResult = await consume({ accountId: gameAccountAddress, noteIds: [challengeNoteId] });
-      log(`Challenge consume succeeded! TX: ${JSON.stringify(challengeResult)}`);
-      consumedNoteIds.current.add(challengeNoteId);
+      for (let attempt = 1; attempt <= CONSUME_MAX_RETRIES; attempt++) {
+        const delay = attempt === 1 ? NETWORK_SYNC_DELAY_MS : CONSUME_RETRY_DELAY_MS;
+        log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Waiting ${delay / 1000}s then syncing...`);
+        await new Promise((r) => setTimeout(r, delay));
+        await sync();
+        try {
+          const challengeResult = await consume({ accountId: gameAccountAddress, noteIds: [challengeNoteId] });
+          log(`Challenge consume succeeded! TX: ${JSON.stringify(challengeResult)}`);
+          consumedNoteIds.current.add(challengeNoteId);
+          break;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Challenge consume failed: ${msg}`);
+          if (attempt === CONSUME_MAX_RETRIES) throw err;
+        }
+      }
 
       // Step 5: Send accept note to joiner
       log("Submitting accept note → joiner account...");
