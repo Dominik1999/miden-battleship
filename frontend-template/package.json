@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "@miden-sdk/miden-sdk": "0.13.2",
-    "@miden-sdk/miden-wallet-adapter": "0.13.5",
+    "@miden-sdk/miden-wallet-adapter": "0.13.6",
     "@miden-sdk/react": "0.13.3",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"

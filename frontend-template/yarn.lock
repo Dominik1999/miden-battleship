@@ -646,46 +646,46 @@
     dexie "^4.0.1"
     glob "^11.0.0"
 
-"@miden-sdk/miden-wallet-adapter-base@^0.13.5":
-  version "0.13.5"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-base/-/miden-wallet-adapter-base-0.13.5.tgz#150c2f54eb5b7e73890cde9910fac9678eb47a11"
-  integrity sha512-2Pl0BuyHstYTBFKKW9zzq6Wf6T4G8KKW6VQO2gztoOfNIqo7ztT1XwdOIQubvjMaiX+jE2kmlxxnNXuhxj//BA==
+"@miden-sdk/miden-wallet-adapter-base@^0.13.6":
+  version "0.13.6"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-base/-/miden-wallet-adapter-base-0.13.6.tgz#f513306e64fcbb3d76ab3dab7367e66514c3373e"
+  integrity sha512-ATvMyn8DAkz73OPyo0frb4bxWT7tUFMunsoEFOXt2XYjgtQQiL32X4lwj43mvWrlKJ3Gy9bzLF/ck7jkwkYDog==
   dependencies:
     eventemitter3 "^5.0.1"
 
-"@miden-sdk/miden-wallet-adapter-miden@^0.13.5":
-  version "0.13.5"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-miden/-/miden-wallet-adapter-miden-0.13.5.tgz#6a9b5498dd8be3538833b9a534bf3d220905cbc6"
-  integrity sha512-147HqTHYOPOpxiNo93zKmaSp8rNG2n7V7ynrA/ur3jWQjse+/Ip/l7VQ39X/lbM4vO1kOh+T14BDOMFPm00HnQ==
+"@miden-sdk/miden-wallet-adapter-miden@^0.13.6":
+  version "0.13.6"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-miden/-/miden-wallet-adapter-miden-0.13.6.tgz#44382a8243c9bbcfcfc14e08758902816e364c62"
+  integrity sha512-9e1mnUMm/W0C7UsvpYKSaVhrFZmfu9K2IeO0RKcjauHxBdg86WgNKGbN7UdJQc6gS2vhPU2LoijaMNtN+xRCig==
   dependencies:
-    "@miden-sdk/miden-wallet-adapter-base" "^0.13.5"
+    "@miden-sdk/miden-wallet-adapter-base" "^0.13.6"
     nanoid "^5.0.9"
 
-"@miden-sdk/miden-wallet-adapter-react@^0.13.5":
-  version "0.13.5"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-react/-/miden-wallet-adapter-react-0.13.5.tgz#b21e5709b46c3b1c8cf0448db53f5188ae104bbf"
-  integrity sha512-JDg2Dgpz+2z33KGYb+KklwaMRzT4CyHTbRHYpxIDc+SjCdKx4POSxkMyIf7rXVyIpdpcGgq8nbJMXQWmLShivA==
+"@miden-sdk/miden-wallet-adapter-react@^0.13.6":
+  version "0.13.6"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-react/-/miden-wallet-adapter-react-0.13.6.tgz#e9dc88b2159c3dc71bc89ab81c196a66617ea64e"
+  integrity sha512-WFlTZpPqXjdd7MROVebR5EbRDdBoTzR9rbi50OZY48g74R4E9y8mZYcmeWnV40xlFbuYHXDhjBz2NOeKsuxz9g==
   dependencies:
-    "@miden-sdk/miden-wallet-adapter-base" "^0.13.5"
-    "@miden-sdk/miden-wallet-adapter-miden" "^0.13.5"
+    "@miden-sdk/miden-wallet-adapter-base" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-miden" "^0.13.6"
 
-"@miden-sdk/miden-wallet-adapter-reactui@^0.13.5":
-  version "0.13.5"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-reactui/-/miden-wallet-adapter-reactui-0.13.5.tgz#0b67f355eb8e60752bba99cd0371c3a98aa0500d"
-  integrity sha512-6Ix/FPuoCkAzHTtjvV+2B1NeNqqgGQ1ZEaWeeR7w4yRLgSN0nJxcGqsFQNcujabDsGCFtMgWUvALjqh1uMariA==
+"@miden-sdk/miden-wallet-adapter-reactui@^0.13.6":
+  version "0.13.6"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-reactui/-/miden-wallet-adapter-reactui-0.13.6.tgz#7b75de79397edbde2cbbdad6e701a44b2e31a7bc"
+  integrity sha512-Q+SO2Wq6utFVdESg/Mf8nSczbfYCVOxpV0vNkgbHe4hyZ6jNBz40sJ+AtLQ8sDTFjFwZL1ExWMKIFb6dE/XBtA==
   dependencies:
-    "@miden-sdk/miden-wallet-adapter-base" "^0.13.5"
-    "@miden-sdk/miden-wallet-adapter-react" "^0.13.5"
+    "@miden-sdk/miden-wallet-adapter-base" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-react" "^0.13.6"
 
-"@miden-sdk/miden-wallet-adapter@0.13.5":
-  version "0.13.5"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter/-/miden-wallet-adapter-0.13.5.tgz#b1d62a236dafd6992bac13f5163336d76b58d6eb"
-  integrity sha512-IfjxV17f94gGlEa3tjo05/75+jC20UY7co6hRhAdXkvDV+rtn2XObyjvZYyOrwIta/hhNumoVX+D2WA+VLZ1rQ==
+"@miden-sdk/miden-wallet-adapter@0.13.6":
+  version "0.13.6"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter/-/miden-wallet-adapter-0.13.6.tgz#4233c7faf777673734c155283b1ac23a636c7e62"
+  integrity sha512-qYrnWrSX9lY7b8Y0MoGCbMEyoFJ+pPV90PbuGNY47JGi4ZqQFRSm+vILtOY9Hr+CNWAhfU5LJ7CAXHySRWA6PQ==
   dependencies:
-    "@miden-sdk/miden-wallet-adapter-base" "^0.13.5"
-    "@miden-sdk/miden-wallet-adapter-miden" "^0.13.5"
-    "@miden-sdk/miden-wallet-adapter-react" "^0.13.5"
-    "@miden-sdk/miden-wallet-adapter-reactui" "^0.13.5"
+    "@miden-sdk/miden-wallet-adapter-base" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-miden" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-react" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-reactui" "^0.13.6"
 
 "@miden-sdk/react@0.13.3":
   version "0.13.3"
