@@ -13,7 +13,7 @@
     "test:coverage": "vitest --run --coverage"
   },
   "dependencies": {
-    "@miden-sdk/miden-sdk": "0.13.2",
+    "@miden-sdk/miden-sdk": "0.13.3",
     "@miden-sdk/miden-wallet-adapter": "0.13.6",
     "@miden-sdk/react": "0.13.3",
     "react": "^19.1.1",

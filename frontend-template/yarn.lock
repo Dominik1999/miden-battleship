@@ -637,10 +637,10 @@
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
 
-"@miden-sdk/miden-sdk@0.13.2":
-  version "0.13.2"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-sdk/-/miden-sdk-0.13.2.tgz#d5e58062511c905c312accb768c74853194e4d0e"
-  integrity sha512-XfkYBHZmz+KhgMSGyrtHhUBtlVtyxrHMIemKdKzBx+3H3ijnEvemGo/26MQh6j/bFqB2ikOp8UZm+CW2tJsVvQ==
+"@miden-sdk/miden-sdk@0.13.3":
+  version "0.13.3"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-sdk/-/miden-sdk-0.13.3.tgz#c67bfb2a1630ce83d046d2c06c427423a0fcd319"
+  integrity sha512-K8dk40XyWzMtq0hWTiSra/MigjaPm1hY2i63I1QtVeP0u42RqC8IXIRq08cnPZoQGAjwVIQJhSmI4tIDzWgDPA==
   dependencies:
     "@rollup/plugin-typescript" "^12.3.0"
     dexie "^4.0.1"

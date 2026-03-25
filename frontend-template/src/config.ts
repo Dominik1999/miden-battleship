@@ -36,4 +36,6 @@ export const APP_NAME = "Miden Battleship";
 export const MIDEN_RPC_URL =
   import.meta.env.VITE_MIDEN_RPC_URL ?? "testnet";
 export const MIDEN_PROVER =
-  (import.meta.env.VITE_MIDEN_PROVER as "testnet" | "local") ?? "testnet";
+  (import.meta.env.VITE_MIDEN_PROVER as "testnet" | "local") ?? "local";
+export const MIDEN_NOTE_TRANSPORT_URL =
+  import.meta.env.VITE_MIDEN_NOTE_TRANSPORT_URL ?? "https://transport.miden.io";
