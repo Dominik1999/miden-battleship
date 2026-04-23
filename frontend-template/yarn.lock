@@ -637,67 +637,67 @@
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
 
-"@miden-sdk/miden-sdk@0.13.3":
-  version "0.13.3"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-sdk/-/miden-sdk-0.13.3.tgz#c67bfb2a1630ce83d046d2c06c427423a0fcd319"
-  integrity sha512-K8dk40XyWzMtq0hWTiSra/MigjaPm1hY2i63I1QtVeP0u42RqC8IXIRq08cnPZoQGAjwVIQJhSmI4tIDzWgDPA==
+"@miden-sdk/miden-sdk@0.14.4":
+  version "0.14.4"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-sdk/-/miden-sdk-0.14.4.tgz#be7496e6d2622b7f478768972f9896536db154cb"
+  integrity sha512-Qt+3NfGRCyHP5zcD+m9bBqQz01zuAwZRUBkls09mi+tOPVT17sFWKLglQEtKdr3gPAFHLwz2Ja4Hp4adUKfLuA==
   dependencies:
     "@rollup/plugin-typescript" "^12.3.0"
     dexie "^4.0.1"
     glob "^11.0.0"
 
-"@miden-sdk/miden-wallet-adapter-base@^0.13.6":
-  version "0.13.6"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-base/-/miden-wallet-adapter-base-0.13.6.tgz#f513306e64fcbb3d76ab3dab7367e66514c3373e"
-  integrity sha512-ATvMyn8DAkz73OPyo0frb4bxWT7tUFMunsoEFOXt2XYjgtQQiL32X4lwj43mvWrlKJ3Gy9bzLF/ck7jkwkYDog==
+"@miden-sdk/miden-wallet-adapter-base@^0.14.3":
+  version "0.14.3"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-base/-/miden-wallet-adapter-base-0.14.3.tgz#3ab7960d314e467a3f1d5bfbd70583fc93e647ab"
+  integrity sha512-SfoIMnzP4OD4u6I8GyYvlbghXuXInw6vkQMmE+s8xTcshEiZk38MbVmmlPTtSFAhz7Z+K3nAOsW84EMn83d52A==
   dependencies:
     eventemitter3 "^5.0.1"
 
-"@miden-sdk/miden-wallet-adapter-miden@^0.13.6":
-  version "0.13.6"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-miden/-/miden-wallet-adapter-miden-0.13.6.tgz#44382a8243c9bbcfcfc14e08758902816e364c62"
-  integrity sha512-9e1mnUMm/W0C7UsvpYKSaVhrFZmfu9K2IeO0RKcjauHxBdg86WgNKGbN7UdJQc6gS2vhPU2LoijaMNtN+xRCig==
+"@miden-sdk/miden-wallet-adapter-miden@^0.14.3":
+  version "0.14.3"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-miden/-/miden-wallet-adapter-miden-0.14.3.tgz#8718028f1a27bc843c43b581e3197cdee169ba2d"
+  integrity sha512-amZsYB41XZ/RyMgokygU99VqGwwWd+bmHbHPbOnoOMMHvPlskc+9Zn2IowNE13qzjzOfn4BhWG2jQErrg8m12g==
   dependencies:
-    "@miden-sdk/miden-wallet-adapter-base" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-base" "^0.14.3"
     nanoid "^5.0.9"
 
-"@miden-sdk/miden-wallet-adapter-react@^0.13.6":
-  version "0.13.6"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-react/-/miden-wallet-adapter-react-0.13.6.tgz#e9dc88b2159c3dc71bc89ab81c196a66617ea64e"
-  integrity sha512-WFlTZpPqXjdd7MROVebR5EbRDdBoTzR9rbi50OZY48g74R4E9y8mZYcmeWnV40xlFbuYHXDhjBz2NOeKsuxz9g==
+"@miden-sdk/miden-wallet-adapter-react@^0.14.3":
+  version "0.14.3"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-react/-/miden-wallet-adapter-react-0.14.3.tgz#bb654000fd96ef3b4e568d78ec320da26cf397f6"
+  integrity sha512-PqweUFoWf6YJaVx1FW2s6gc6vp6oz2pey0wmMzYpjxH24TZMQ+hooRYhql7FgGkfYo1VMQkXlVzCLyymgmn8SQ==
   dependencies:
-    "@miden-sdk/miden-wallet-adapter-base" "^0.13.6"
-    "@miden-sdk/miden-wallet-adapter-miden" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-base" "^0.14.3"
+    "@miden-sdk/miden-wallet-adapter-miden" "^0.14.3"
 
-"@miden-sdk/miden-wallet-adapter-reactui@^0.13.6":
-  version "0.13.6"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-reactui/-/miden-wallet-adapter-reactui-0.13.6.tgz#7b75de79397edbde2cbbdad6e701a44b2e31a7bc"
-  integrity sha512-Q+SO2Wq6utFVdESg/Mf8nSczbfYCVOxpV0vNkgbHe4hyZ6jNBz40sJ+AtLQ8sDTFjFwZL1ExWMKIFb6dE/XBtA==
+"@miden-sdk/miden-wallet-adapter-reactui@^0.14.3":
+  version "0.14.3"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter-reactui/-/miden-wallet-adapter-reactui-0.14.3.tgz#6e9f66c16b45540e6e8c31571039ef9864a14bb5"
+  integrity sha512-FD8+ehYdnLX5L7yN48IozT+uvElxfnM6OtLyP9mOv/4vtiu6S1JfDzqID7bG2+j31l91b9JAsqUwEC/c1WLJ8Q==
   dependencies:
-    "@miden-sdk/miden-wallet-adapter-base" "^0.13.6"
-    "@miden-sdk/miden-wallet-adapter-react" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-base" "^0.14.3"
+    "@miden-sdk/miden-wallet-adapter-react" "^0.14.3"
 
-"@miden-sdk/miden-wallet-adapter@0.13.6":
-  version "0.13.6"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter/-/miden-wallet-adapter-0.13.6.tgz#4233c7faf777673734c155283b1ac23a636c7e62"
-  integrity sha512-qYrnWrSX9lY7b8Y0MoGCbMEyoFJ+pPV90PbuGNY47JGi4ZqQFRSm+vILtOY9Hr+CNWAhfU5LJ7CAXHySRWA6PQ==
+"@miden-sdk/miden-wallet-adapter@0.14.3":
+  version "0.14.3"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-wallet-adapter/-/miden-wallet-adapter-0.14.3.tgz#77420f84dabd7ba4ef9626b74e8d0349609a5034"
+  integrity sha512-VWs0Q/DEbtw2kHVr8qEnQodyuINQBOIRSIeyqccXBtiUUpBaYvk9/+mg17VbtICpATgjkyymKBAdRPmcwi38Hw==
   dependencies:
-    "@miden-sdk/miden-wallet-adapter-base" "^0.13.6"
-    "@miden-sdk/miden-wallet-adapter-miden" "^0.13.6"
-    "@miden-sdk/miden-wallet-adapter-react" "^0.13.6"
-    "@miden-sdk/miden-wallet-adapter-reactui" "^0.13.6"
+    "@miden-sdk/miden-wallet-adapter-base" "^0.14.3"
+    "@miden-sdk/miden-wallet-adapter-miden" "^0.14.3"
+    "@miden-sdk/miden-wallet-adapter-react" "^0.14.3"
+    "@miden-sdk/miden-wallet-adapter-reactui" "^0.14.3"
 
-"@miden-sdk/react@0.13.3":
-  version "0.13.3"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/react/-/react-0.13.3.tgz#943f560709053f78d2914912571780e4690609f7"
-  integrity sha512-jJ/j61C/53bsDXi80AllZSygoGd5+GSFRFLSMHLIto3zO9IiQ7JTbmHOtKLp7qTh+VozLyE0wE/pTsWYoVtKQg==
+"@miden-sdk/react@0.14.4":
+  version "0.14.4"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/react/-/react-0.14.4.tgz#6bb6e05572f6a4a63806e580bffc6156658e52f4"
+  integrity sha512-ASTcH1nge7hgH9OcV22nb1nrB9ccdkTsgVIioY+6y2wt0NcnTwu9RGrq8heJu4VyPcnl0g0LVFPcubvkmzXyjw==
   dependencies:
     zustand "^5.0.0"
 
-"@miden-sdk/vite-plugin@0.13.4":
-  version "0.13.4"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/vite-plugin/-/vite-plugin-0.13.4.tgz#72370985960b888395e1850d3b1e2ab41bde8b12"
-  integrity sha512-BojOl1hF01wsHAXWDTm9gcMkMDqngE28SDLXZFJT2c6lgUouB7LzMkmKvWz0+qO0clOKY2/4R5LBQeAj5m74ZA==
+"@miden-sdk/vite-plugin@0.14.4":
+  version "0.14.4"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/vite-plugin/-/vite-plugin-0.14.4.tgz#b6d4b45f60120c2c65ba5afdf47cef9ec7e8077d"
+  integrity sha512-E9y0dJVsrWzgoB06y9+8MibOjzoS37apBwbTa9AEloaFPPOxsJnlrprZG2dbm2xwhc3HQNzVRI9NkJ1ijFpALQ==
 
 "@rolldown/pluginutils@1.0.0-beta.27":
   version "1.0.0-beta.27"

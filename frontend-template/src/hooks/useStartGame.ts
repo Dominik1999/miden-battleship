@@ -278,7 +278,7 @@ export function useStartGame() {
       // Challenge note inputs: [0..3]=game_id, [4]=joiner_prefix, [5]=joiner_suffix, [6..9]=commitment
       const challengeNote = pendingNotes[0];
       const challengeNoteId = challengeNote.id().toString();
-      const noteInputs = challengeNote.details().recipient().inputs().values();
+      const noteInputs = challengeNote.details().recipient().storage().items();
       const challengeGameId = [noteInputs[0], noteInputs[1], noteInputs[2], noteInputs[3]];
       const joinerPrefix = noteInputs[4];
       const joinerSuffix = noteInputs[5];
@@ -312,7 +312,7 @@ export function useStartGame() {
         await new Promise((r) => setTimeout(r, delay));
         await sync();
         try {
-          const setupResult = await consume({ accountId: gameAccountAddress, noteIds: [setupNoteId] });
+          const setupResult = await consume({ accountId: gameAccountAddress, notes: [setupNoteId] });
           log(`Setup consume succeeded! TX: ${JSON.stringify(setupResult)}`);
           consumedNoteIds.current.add(setupNoteId);
           break;
@@ -332,7 +332,7 @@ export function useStartGame() {
         await new Promise((r) => setTimeout(r, delay));
         await sync();
         try {
-          const challengeResult = await consume({ accountId: gameAccountAddress, noteIds: [challengeNoteId] });
+          const challengeResult = await consume({ accountId: gameAccountAddress, notes: [challengeNoteId] });
           log(`Challenge consume succeeded! TX: ${JSON.stringify(challengeResult)}`);
           consumedNoteIds.current.add(challengeNoteId);
           break;

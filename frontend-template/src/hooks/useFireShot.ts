@@ -12,11 +12,10 @@ import {
   NoteAssets,
   NoteMetadata,
   NoteRecipient,
-  NoteInputs,
+  NoteStorage,
   NoteTag,
   NoteType,
-  OutputNote,
-  OutputNoteArray,
+  NoteArray,
   AccountId,
   Felt,
   FeltArray,
@@ -94,9 +93,9 @@ export function useFireShot(
         const shooterTag = NoteTag.withAccountTarget(walletAccountId);
         inputFelts.push(new Felt(BigInt(shooterTag.asU32())));
 
-        const inputs = new NoteInputs(inputFelts);
+        const storage = new NoteStorage(inputFelts);
         const serialNum = randomWord();
-        const recipient = new NoteRecipient(serialNum, noteScript, inputs);
+        const recipient = new NoteRecipient(serialNum, noteScript, storage);
 
         // Build note metadata targeting the defender's game account
         const tag = NoteTag.withAccountTarget(defenderAccountId);
@@ -108,9 +107,8 @@ export function useFireShot(
 
         // Assemble note and submit
         const note = new Note(new NoteAssets(), metadata, recipient);
-        const outputNote = OutputNote.full(note);
         const txRequest = new TransactionRequestBuilder()
-          .withOwnOutputNotes(new OutputNoteArray([outputNote]))
+          .withOwnOutputNotes(new NoteArray([note]))
           .build();
 
         const tx = Transaction.createCustomTransaction(

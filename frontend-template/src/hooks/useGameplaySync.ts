@@ -7,7 +7,7 @@ import {
   NoteRecipient,
   NoteRecipientArray,
   NoteScript,
-  NoteInputs,
+  NoteStorage,
   Package,
   AccountId,
   Felt,
@@ -108,7 +108,7 @@ export function useGameplaySync(
 
         const note = noteRecord.toNote();
         log(`Note metadata: tag=${note.metadata().tag().asU32()}, type=${note.metadata().noteType()}`);
-        const noteInputs = note.recipient().inputs().values();
+        const noteInputs = note.recipient().storage().items();
         log(`Note has ${noteInputs.length} inputs`);
 
         if (noteInputs.length === 4) {
@@ -176,7 +176,7 @@ export function useGameplaySync(
         const correctRecipient = new NoteRecipient(
           serialNum,
           resultScript,
-          new NoteInputs(resultNoteInputs),
+          new NoteStorage(resultNoteInputs),
         );
         const recipientArray = new NoteRecipientArray([correctRecipient]);
 
@@ -208,7 +208,7 @@ export function useGameplaySync(
       if (txRequest === null) {
         // Result-note: simple consume via SDK hook
         log(`Consuming result-note ${noteIdStr} via useConsume...`);
-        await consume({ accountId: myAccountId, noteIds: [noteIdStr] });
+        await consume({ accountId: myAccountId, notes: [noteIdStr] });
         log(`Result-note ${noteIdStr} consumed`);
         return;
       }
@@ -272,7 +272,7 @@ export function useGameplaySync(
         if (resultNoteIds.length > 0) {
           log(`Batch-consuming ${resultNoteIds.length} result-note(s): ${resultNoteIds.join(", ")}`);
           try {
-            await consume({ accountId: myAccountId, noteIds: resultNoteIds });
+            await consume({ accountId: myAccountId, notes: resultNoteIds });
             resultNoteIds.forEach((id) => handledNoteIds.add(id));
             log(`Result-notes consumed successfully`);
           } catch (err) {

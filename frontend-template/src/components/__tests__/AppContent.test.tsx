@@ -112,6 +112,7 @@ describe("AppContent", () => {
       runExclusive: vi.fn(),
       prover: null,
       signerAccountId: null,
+      signerConnected: false,
     });
 
     render(<AppContent />);
@@ -132,6 +133,7 @@ describe("AppContent", () => {
       runExclusive: vi.fn(),
       prover: null,
       signerAccountId: null,
+      signerConnected: false,
     });
 
     render(<AppContent />);

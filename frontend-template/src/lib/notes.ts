@@ -6,11 +6,10 @@ import {
   NoteAssets,
   NoteMetadata,
   NoteRecipient,
-  NoteInputs,
+  NoteStorage,
   NoteTag,
   NoteType,
-  OutputNote,
-  OutputNoteArray,
+  NoteArray,
   AccountId,
   AccountBuilder,
   AccountComponent,
@@ -102,9 +101,9 @@ export async function submitNote(
   log(`Building ${noteTypeName} note → target: ${targetAddress}`);
 
   const noteScript = NoteScript.fromPackage(pkg);
-  const noteInputs = new NoteInputs(inputs);
+  const noteStorage = new NoteStorage(inputs);
   const serialNum = randomWord();
-  const recipient = new NoteRecipient(serialNum, noteScript, noteInputs);
+  const recipient = new NoteRecipient(serialNum, noteScript, noteStorage);
 
   // Use account-targeted tag for proper routing
   // (raw integer tags like 1-4 don't encode routing info)
@@ -118,9 +117,8 @@ export async function submitNote(
   const note = new Note(new NoteAssets(), metadata, recipient);
   log(`Built ${noteTypeName} note — ID: ${note.id().toString()}, noteTag: ${noteTag.asU32()}, sender: ${walletAddress}`);
 
-  const outputNote = OutputNote.full(note);
   const txRequest = new TransactionRequestBuilder()
-    .withOwnOutputNotes(new OutputNoteArray([outputNote]))
+    .withOwnOutputNotes(new NoteArray([note]))
     .build();
 
   const tx = Transaction.createCustomTransaction(
@@ -153,13 +151,13 @@ export async function createGameAccount(
   // 6. reveal_status: [my_revealed, opponent_verified, 0, 0]
   // 7. my_board: StorageMap for board cells and ship counts
   const slots = new StorageSlotArray([
-    StorageSlot.emptyValue("miden::component::miden_battleship_account::game_config"),
-    StorageSlot.emptyValue("miden::component::miden_battleship_account::opponent"),
-    StorageSlot.emptyValue("miden::component::miden_battleship_account::board_commitment"),
-    StorageSlot.emptyValue("miden::component::miden_battleship_account::opponent_commitment"),
-    StorageSlot.emptyValue("miden::component::miden_battleship_account::game_id"),
-    StorageSlot.emptyValue("miden::component::miden_battleship_account::reveal_status"),
-    StorageSlot.map("miden::component::miden_battleship_account::my_board", new StorageMap()),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::game_config"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::opponent"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_commitment"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::opponent_commitment"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::game_id"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::reveal_status"),
+    StorageSlot.map("miden_battleship_account::battleship_account::my_board", new StorageMap()),
   ]);
   const component = AccountComponent.fromPackage(battleshipPkg, slots).withSupportsAllTypes();
 

@@ -285,7 +285,7 @@ export function useJoinGame() {
       for (let attempt = 1; attempt <= CONSUME_MAX_RETRIES; attempt++) {
         try {
           log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Consuming note ${noteId}...`);
-          const result = await consume({ accountId: gameAccountAddress, noteIds: [noteId] });
+          const result = await consume({ accountId: gameAccountAddress, notes: [noteId] });
           log(`Consume succeeded for ${noteId}: ${JSON.stringify(result)}`);
           consumedNoteIds.current.add(noteId);
           consumed = true;

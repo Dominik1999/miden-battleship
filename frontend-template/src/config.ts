@@ -4,19 +4,19 @@ export const RESULT_SCRIPT_ROOT: [bigint, bigint, bigint, bigint] = [15171288892
 
 // Storage slot names (must match contract)
 export const SLOT_GAME_CONFIG =
-  "miden::component::miden_battleship_account::game_config";
+  "miden_battleship_account::battleship_account::game_config";
 export const SLOT_OPPONENT =
-  "miden::component::miden_battleship_account::opponent";
+  "miden_battleship_account::battleship_account::opponent";
 export const SLOT_BOARD =
-  "miden::component::miden_battleship_account::my_board";
+  "miden_battleship_account::battleship_account::my_board";
 export const SLOT_BOARD_COMMITMENT =
-  "miden::component::miden_battleship_account::board_commitment";
+  "miden_battleship_account::battleship_account::board_commitment";
 export const SLOT_OPPONENT_COMMITMENT =
-  "miden::component::miden_battleship_account::opponent_commitment";
+  "miden_battleship_account::battleship_account::opponent_commitment";
 export const SLOT_GAME_ID =
-  "miden::component::miden_battleship_account::game_id";
+  "miden_battleship_account::battleship_account::game_id";
 export const SLOT_REVEAL_STATUS =
-  "miden::component::miden_battleship_account::reveal_status";
+  "miden_battleship_account::battleship_account::reveal_status";
 
 // Game constants
 export const GRID_SIZE = 10;

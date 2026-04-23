@@ -35,8 +35,8 @@ export function createMockGameStorage(opts: {
   const opponent = mockWord([0n, 0n, BigInt(opts.shipsHitCount), BigInt(opts.totalShotsReceived)]);
 
   const slotMap: Record<string, ReturnType<typeof mockWord>> = {
-    "miden::component::miden_battleship_account::game_config": gameConfig,
-    "miden::component::miden_battleship_account::opponent": opponent,
+    "miden_battleship_account::battleship_account::game_config": gameConfig,
+    "miden_battleship_account::battleship_account::opponent": opponent,
   };
 
   // Build board cells for StorageMap

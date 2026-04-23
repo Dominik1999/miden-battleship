@@ -28,7 +28,7 @@ vi.mock("@miden-sdk/miden-sdk", () => {
     NoteAssets: Stub,
     NoteMetadata: Stub,
     NoteRecipient: Stub,
-    NoteInputs: Stub,
+    NoteStorage: Stub,
     NoteTag: {
       withAccountTarget: vi.fn(() => ({ asU32: vi.fn(() => 42) })),
     },
@@ -37,8 +37,7 @@ vi.mock("@miden-sdk/miden-sdk", () => {
       newNetworkAccountTarget: vi.fn(() => ({})),
     },
     NoteExecutionHint: { always: vi.fn(() => ({})) },
-    OutputNote: { full: vi.fn(() => ({})) },
-    OutputNoteArray: Stub,
+    NoteArray: Stub,
     TransactionRequestBuilder: MockTRB,
     AccountId: {
       fromBech32: vi.fn(() => ({
