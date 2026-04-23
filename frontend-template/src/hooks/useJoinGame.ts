@@ -7,6 +7,7 @@ import {
   useMidenClient,
   useNotes,
   useSyncState,
+  useTransaction,
 } from "@miden-sdk/react";
 import { useMidenFiWallet } from "@miden-sdk/miden-wallet-adapter";
 import { AccountId, NoteTag } from "@miden-sdk/miden-sdk";
@@ -57,13 +58,13 @@ export function useJoinGame() {
   const {
     address: walletAddress,
     connected,
-    requestTransaction,
   } = useMidenFiWallet();
   const client = useMidenClient();
   const { runExclusive } = useMiden();
   const { sync } = useSyncState();
   const { importAccount } = useImportAccount();
   const { consume, isLoading: isConsuming } = useConsume();
+  const { execute } = useTransaction();
 
   // Track our game account to poll for phase change
   const { account: gameAccount, refetch: refetchGame } = useAccount(
@@ -90,7 +91,7 @@ export function useJoinGame() {
       starterAddr: string,
       cells: ShipCell[],
     ): Promise<string | null> => {
-      if (!walletAddress || !requestTransaction) {
+      if (!walletAddress) {
         setError("Wallet not connected");
         setStage("error");
         return null;
@@ -99,8 +100,20 @@ export function useJoinGame() {
       setStarterAddress(starterAddr);
 
       try {
-        // Load packages
+        // Ensure the wallet account is tracked in the app's Miden client.
+        // clearMidenStorage() wipes IndexedDB on page load, and the
+        // MidenFiSignerProvider re-import may not complete before we get here.
         setStage("loading");
+        log("Importing wallet account into app client...");
+        try {
+          await importAccount({ type: "id", accountId: walletAddress });
+          log("Wallet account imported.");
+        } catch (e) {
+          // May already be imported — that's fine
+          log(`Wallet import note: ${e instanceof Error ? e.message : String(e)}`);
+        }
+
+        // Load packages
         log("Loading .masp packages...");
         const [battleshipPkg, setupPkg, challengePkg] = await Promise.all([
           loadPackage("battleship_account.masp"),
@@ -141,7 +154,7 @@ export function useJoinGame() {
         const gameIdFelts = gameId.toFelts();
         const commitFelts = commitment.toFelts();
 
-        // Submit setup note (opponent = starter)
+        // Submit setup note (opponent = starter) — wallet is sender (has proper auth)
         setStage("setting-up");
         log("Submitting setup note (tag=2) → joiner game account...");
         await submitNote(
@@ -158,10 +171,10 @@ export function useJoinGame() {
           2,
           walletAddress,
           walletId,
-          requestTransaction as (tx: unknown) => Promise<unknown>,
+          execute,
         );
 
-        // Submit challenge note (targeting starter)
+        // Submit challenge note (targeting starter) — wallet is sender
         setStage("challenging");
         log("Submitting challenge note (tag=3) → starter game account...");
         await submitNote(
@@ -177,7 +190,7 @@ export function useJoinGame() {
           3,
           walletAddress,
           walletId,
-          requestTransaction as (tx: unknown) => Promise<unknown>,
+          execute,
         );
 
         // Wait for initial sync
@@ -203,7 +216,7 @@ export function useJoinGame() {
         return null;
       }
     },
-    [walletAddress, requestTransaction, client, importAccount, sync],
+    [walletAddress, execute, client, importAccount, sync],
   );
 
   // Poll for game becoming active (starter sent accept)

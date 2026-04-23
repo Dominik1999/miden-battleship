@@ -1,9 +1,6 @@
 import { useState, useCallback } from "react";
-import { useSyncState } from "@miden-sdk/react";
-import {
-  useMidenFiWallet,
-  Transaction,
-} from "@miden-sdk/miden-wallet-adapter";
+import { useSyncState, useTransaction } from "@miden-sdk/react";
+import { useMidenFiWallet } from "@miden-sdk/miden-wallet-adapter";
 import {
   TransactionRequestBuilder,
   Package,
@@ -45,12 +42,13 @@ export function useFireShot(
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isWaiting, setIsWaiting] = useState(false);
-  const { address: walletAddress, connected, requestTransaction } = useMidenFiWallet();
+  const { address: walletAddress, connected } = useMidenFiWallet();
   const { sync } = useSyncState();
+  const { execute } = useTransaction();
 
   const fireShot = useCallback(
     async (row: number, col: number, turn: number) => {
-      if (!walletAddress || !requestTransaction) {
+      if (!walletAddress) {
         log("Not ready: wallet not connected");
         return;
       }
@@ -105,19 +103,17 @@ export function useFireShot(
           tag,
         );
 
-        // Assemble note and submit
+        // Assemble note and submit — game account is sender (no auth needed)
         const note = new Note(new NoteAssets(), metadata, recipient);
         const txRequest = new TransactionRequestBuilder()
           .withOwnOutputNotes(new NoteArray([note]))
           .build();
 
-        const tx = Transaction.createCustomTransaction(
-          walletAddress,
-          defenderAddress,
-          txRequest,
-        );
-        log("Submitting shot via wallet...");
-        await requestTransaction(tx);
+        log("Executing shot via React SDK...");
+        await execute({
+          accountId: walletAddress,
+          request: txRequest,
+        });
         log("Shot submitted successfully");
         setIsSubmitting(false);
 
@@ -137,7 +133,7 @@ export function useFireShot(
         setError(msg);
       }
     },
-    [walletAddress, requestTransaction, defenderAddress, sync, refetchState],
+    [walletAddress, execute, defenderAddress, sync, refetchState],
   );
 
   return {

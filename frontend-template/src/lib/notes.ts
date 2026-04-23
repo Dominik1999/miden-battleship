@@ -23,9 +23,15 @@ import {
   Felt,
   FeltArray,
 } from "@miden-sdk/miden-sdk";
-import { Transaction } from "@miden-sdk/miden-wallet-adapter";
 import { randomWord } from "@/lib/miden";
 import type { ShipCell } from "@/types/game";
+
+/** Type for the execute function from useTransaction() */
+export type ExecuteFn = (params: {
+  accountId: string;
+  request: unknown;
+  skipSync?: boolean;
+}) => Promise<unknown>;
 
 const log = (msg: string, ...args: unknown[]) =>
   console.log(`%c[Notes] ${msg}`, "color: #6af; font-weight: bold", ...args);
@@ -86,7 +92,11 @@ export function buildHandshakeInputs(
   return arr;
 }
 
-/** Build, sign, and submit a note via the wallet adapter */
+/**
+ * Build and submit a note using the wallet account as the sender.
+ * The wallet account has proper auth via MidenFiSignerProvider.
+ * Uses useTransaction to execute through the app's Miden client.
+ */
 export async function submitNote(
   pkg: Package,
   inputs: FeltArray,
@@ -95,7 +105,7 @@ export async function submitNote(
   tag: number,
   walletAddress: string,
   walletId: AccountId,
-  requestTransaction: (tx: unknown) => Promise<unknown>,
+  execute: ExecuteFn,
 ): Promise<string> {
   const noteTypeName = NOTE_TAG_NAMES[tag] ?? `unknown(tag=${tag})`;
   log(`Building ${noteTypeName} note → target: ${targetAddress}`);
@@ -106,7 +116,6 @@ export async function submitNote(
   const recipient = new NoteRecipient(serialNum, noteScript, noteStorage);
 
   // Use account-targeted tag for proper routing
-  // (raw integer tags like 1-4 don't encode routing info)
   const noteTag = NoteTag.withAccountTarget(targetAccount);
   const metadata = new NoteMetadata(
     walletId,
@@ -121,13 +130,13 @@ export async function submitNote(
     .withOwnOutputNotes(new NoteArray([note]))
     .build();
 
-  const tx = Transaction.createCustomTransaction(
-    walletAddress,
-    targetAddress,
-    txRequest,
-  );
-  log(`Submitting ${noteTypeName} note via wallet adapter...`);
-  await requestTransaction(tx);
+  // Execute through the app's Miden client with the wallet as sender.
+  // The wallet account was imported by MidenFiSignerProvider and has proper auth.
+  log(`Executing ${noteTypeName} note via React SDK (wallet: ${walletAddress})...`);
+  await execute({
+    accountId: walletAddress,
+    request: txRequest,
+  });
   log(`${noteTypeName} note ${note.id().toString()} submitted successfully`);
   return note.id().toString();
 }
@@ -165,6 +174,7 @@ export async function createGameAccount(
     .accountType(AccountType.RegularAccountImmutableCode)
     .storageMode(AccountStorageMode.tryFromStr("public"))
     .withComponent(component)
+    .withBasicWalletComponent()
     .withNoAuthComponent();
 
   const result = builder.build();
