@@ -20,7 +20,7 @@ struct AcceptNote;
 impl AcceptNote {
     #[note_script]
     fn run(self, _arg: Word) {
-        let inputs = active_note::get_inputs();
+        let inputs = active_note::get_storage();
 
         let game_id = Word::from([inputs[0], inputs[1], inputs[2], inputs[3]]);
         let acceptor_prefix = inputs[4];

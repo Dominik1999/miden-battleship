@@ -15,7 +15,7 @@ use clap::Parser;
 use miden_client::{
     account::AccountId,
     keystore::FilesystemKeyStore,
-    note::{Note, NoteInputs, NoteRecipient, NoteScript, NoteTag},
+    note::{Note, NoteStorage, NoteRecipient, NoteScript, NoteTag},
     store::NoteFilter,
     transaction::{OutputNote, TransactionRequestBuilder},
     Client, Felt, Word,
@@ -155,7 +155,7 @@ async fn publish_note(
     note: Note,
 ) -> Result<()> {
     let request = TransactionRequestBuilder::new()
-        .own_output_notes(vec![OutputNote::Full(note)])
+        .own_output_notes(vec![note])
         .build()?;
     client.submit_new_transaction(sender_id, request).await?;
     client.sync_state().await?;
@@ -254,23 +254,23 @@ fn game_id_from_string(s: &str) -> Word {
 
 /// Extract fields from a shot-note's inputs.
 /// Input layout: [row, col, turn, serial[4], result_script_root[4], shooter_prefix, shooter_suffix, shooter_tag]
-struct ShotNoteInputs {
+struct ShotNoteStorage {
     row: u64,
     col: u64,
     turn: u64,
     serial: Word,
 }
 
-impl ShotNoteInputs {
+impl ShotNoteStorage {
     fn from_note(note: &Note) -> Result<Self> {
-        let inputs = note.recipient().inputs().values();
+        let inputs = note.recipient().storage().items();
         if inputs.len() < 14 {
             bail!("Shot note has {} inputs, expected 14", inputs.len());
         }
         Ok(Self {
-            row: inputs[0].as_int(),
-            col: inputs[1].as_int(),
-            turn: inputs[2].as_int(),
+            row: inputs[0].as_canonical_u64(),
+            col: inputs[1].as_canonical_u64(),
+            turn: inputs[2].as_canonical_u64(),
             serial: Word::from([inputs[3], inputs[4], inputs[5], inputs[6]]),
         })
     }
@@ -354,8 +354,8 @@ async fn main() -> Result<()> {
     println!("Setting up board with classic ship placement...");
     let setup_inputs = build_setup_inputs(
         game_id,
-        opp_prefix.as_int(),
-        opp_suffix.as_int(),
+        opp_prefix.as_canonical_u64(),
+        opp_suffix.as_canonical_u64(),
         commitment,
         &ship_cells,
     );
@@ -452,11 +452,8 @@ async fn main() -> Result<()> {
 
     // ── Shot loop ──
     let result_script_root = get_note_script_root(&pkgs.result_note);
-    let result_program = pkgs.result_note.unwrap_program();
-    let result_script = NoteScript::from_parts(
-        result_program.mast_forest().clone(),
-        result_program.entrypoint(),
-    );
+    
+    let result_script = NoteScript::from_library(&pkgs.result_note.mast).expect("from_library");
 
     let mut my_shots: Vec<(usize, usize, bool)> = Vec::new();
     let mut hits_on_me: Vec<(usize, usize, bool)> = Vec::new();
@@ -697,11 +694,11 @@ async fn fire_shot(
     println!();
 
     // Read result from note inputs: [shooter_prefix, shooter_suffix, turn, encoded_result]
-    let result_inputs = result_note.recipient().inputs().values();
+    let result_inputs = result_note.recipient().storage().items();
     if result_inputs.len() < 4 {
         bail!("Result note has too few inputs");
     }
-    let encoded_result = result_inputs[3].as_int();
+    let encoded_result = result_inputs[3].as_canonical_u64();
     let is_hit = encoded_result >= 2; // encoded = result * 2 + game_over
     let is_game_over = encoded_result % 2 == 1;
 
@@ -752,7 +749,7 @@ async fn defend_shot(
     println!();
 
     // Parse shot-note inputs
-    let shot_inputs = ShotNoteInputs::from_note(&shot_note)?;
+    let shot_inputs = ShotNoteStorage::from_note(&shot_note)?;
     let row = shot_inputs.row;
     let col = shot_inputs.col;
     println!(
@@ -774,12 +771,12 @@ async fn defend_shot(
 
     // Build expected result-note recipient
     // Result-note inputs: [shooter_prefix, shooter_suffix, turn, encoded_result]
-    let shot_all_inputs = shot_note.recipient().inputs().values();
+    let shot_all_inputs = shot_note.recipient().storage().items();
     let shooter_prefix = shot_all_inputs[11]; // from shot-note input layout
     let shooter_suffix = shot_all_inputs[12];
 
     let result_inputs =
-        NoteInputs::new(vec![shooter_prefix, shooter_suffix, Felt::new(shot_inputs.turn), Felt::new(encoded)])?;
+        NoteStorage::new(vec![shooter_prefix, shooter_suffix, Felt::new(shot_inputs.turn), Felt::new(encoded)])?;
     let result_recipient =
         NoteRecipient::new(shot_inputs.serial, result_script.clone(), result_inputs);
 

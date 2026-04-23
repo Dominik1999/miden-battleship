@@ -4,15 +4,17 @@ use integration::helpers::{
 };
 
 use miden_client::{
+    auth::AuthScheme,
     account::{
         component::NoAuth, Account, AccountBuilder, AccountId, StorageMap, StorageSlot,
         StorageSlotName,
     },
-    note::{Note, NoteInputs, NoteMetadata, NoteRecipient, NoteScript, NoteTag, NoteType},
+    note::{Note, NoteStorage, NoteMetadata, NoteRecipient, NoteScript, NoteTag, NoteType},
     transaction::OutputNote,
     Felt, Word,
 };
 use miden_testing::{Auth, MockChain};
+use miden_protocol::transaction::RawOutputNote;
 use std::{path::Path, sync::Arc};
 
 // ============================================================================
@@ -20,25 +22,25 @@ use std::{path::Path, sync::Arc};
 // ============================================================================
 
 fn board_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::my_board").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::my_board").unwrap()
 }
 fn game_config_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::game_config").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::game_config").unwrap()
 }
 fn opponent_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::opponent").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::opponent").unwrap()
 }
 fn board_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::board_commitment").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::board_commitment").unwrap()
 }
 fn opponent_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::opponent_commitment").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::opponent_commitment").unwrap()
 }
 fn game_id_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::game_id").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::game_id").unwrap()
 }
 fn reveal_status_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::reveal_status").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::reveal_status").unwrap()
 }
 
 fn all_storage_slots() -> Vec<StorageSlot> {
@@ -163,11 +165,7 @@ fn build_note_packages() -> anyhow::Result<NotePackages> {
 
 /// Get the MAST root (script root) of a compiled note package
 fn get_note_script_root(pkg: &miden_mast_package::Package) -> Word {
-    let program = pkg.unwrap_program();
-    let script = NoteScript::from_parts(
-        program.mast_forest().clone(),
-        program.entrypoint(),
-    );
+    let script = NoteScript::from_library(&pkg.mast).expect("from_library");
     script.root()
 }
 
@@ -204,8 +202,8 @@ async fn create_active_account(
     let accept_note = make_action_note(&pkgs.action_note, sender_id, accept_inputs, (note_tag_base + 1) as u64)?;
 
     builder.add_account(account.clone())?;
-    builder.add_output_note(OutputNote::Full(setup_note.clone()));
-    builder.add_output_note(OutputNote::Full(accept_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(setup_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(accept_note.clone()));
 
     Ok((account, vec![setup_note, accept_note]))
 }
@@ -222,15 +220,12 @@ fn build_expected_result_note(
     encoded_result: Felt,
     tag: NoteTag,
 ) -> anyhow::Result<Note> {
-    let program = result_note_pkg.unwrap_program();
-    let script = NoteScript::from_parts(
-        program.mast_forest().clone(),
-        program.entrypoint(),
-    );
+    
+    let script = NoteScript::from_library(&result_note_pkg.mast).expect("from_library");
 
-    let inputs = NoteInputs::new(vec![shooter_prefix, shooter_suffix, turn, encoded_result])?;
+    let inputs = NoteStorage::new(vec![shooter_prefix, shooter_suffix, turn, encoded_result])?;
     let recipient = NoteRecipient::new(serial_num, script, inputs);
-    let metadata = NoteMetadata::new(sender_id, NoteType::Public, tag);
+    let metadata = NoteMetadata::new(sender_id, NoteType::Public).with_tag(tag);
 
     Ok(Note::new(Default::default(), metadata, recipient))
 }
@@ -245,7 +240,7 @@ fn build_expected_result_note(
 async fn test_shot_note_creates_result_note() -> anyhow::Result<()> {
     let pkgs = build_note_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
     let (mut account, setup_notes) = create_active_account(
@@ -275,7 +270,7 @@ async fn test_shot_note_creates_result_note() -> anyhow::Result<()> {
             ..Default::default()
         },
     )?;
-    builder.add_output_note(OutputNote::Full(shot_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(shot_note.clone()));
 
     let mut mock_chain = builder.build()?;
 
@@ -303,7 +298,7 @@ async fn test_shot_note_creates_result_note() -> anyhow::Result<()> {
     // Execute shot-note (this should call process_shot AND create a result-note)
     let tx_context = mock_chain
         .build_tx_context(account.id(), &[shot_note.id()], &[])?
-        .extend_expected_output_notes(vec![OutputNote::Full(expected_result)])
+        .extend_expected_output_notes(vec![RawOutputNote::Full(expected_result)])
         .build()?;
     let executed = tx_context.execute().await?;
 
@@ -321,7 +316,7 @@ async fn test_shot_note_creates_result_note() -> anyhow::Result<()> {
     // Verify board state was updated (process_shot ran)
     let cell_key = Word::from([Felt::new(0), Felt::new(0), Felt::new(5), Felt::new(5)]);
     let cell = account.storage().get_map_item(&board_slot(), cell_key).unwrap();
-    assert_eq!(cell[3], Felt::new(7), "Cell (5,5) should be MISS (7)");
+    assert_eq!(cell[0], Felt::new(7), "Cell (5,5) should be MISS (7)");
 
     // Verify turn advanced
     let config = account.storage().get_item(&game_config_slot()).unwrap();
@@ -336,7 +331,7 @@ async fn test_shot_note_creates_result_note() -> anyhow::Result<()> {
 async fn test_shot_note_hit_creates_result_note() -> anyhow::Result<()> {
     let pkgs = build_note_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
     let (mut account, setup_notes) = create_active_account(
@@ -363,7 +358,7 @@ async fn test_shot_note_hit_creates_result_note() -> anyhow::Result<()> {
             ..Default::default()
         },
     )?;
-    builder.add_output_note(OutputNote::Full(shot_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(shot_note.clone()));
 
     let mut mock_chain = builder.build()?;
 
@@ -385,7 +380,7 @@ async fn test_shot_note_hit_creates_result_note() -> anyhow::Result<()> {
     // Execute shot-note
     let tx_context = mock_chain
         .build_tx_context(account.id(), &[shot_note.id()], &[])?
-        .extend_expected_output_notes(vec![OutputNote::Full(expected_result)])
+        .extend_expected_output_notes(vec![RawOutputNote::Full(expected_result)])
         .build()?;
     let executed = tx_context.execute().await?;
 
@@ -399,7 +394,7 @@ async fn test_shot_note_hit_creates_result_note() -> anyhow::Result<()> {
     // Verify HIT
     let cell_key = Word::from([Felt::new(0), Felt::new(0), Felt::new(0), Felt::new(0)]);
     let cell = account.storage().get_map_item(&board_slot(), cell_key).unwrap();
-    assert_eq!(cell[3], Felt::new(6), "Cell (0,0) should be HIT (6)");
+    assert_eq!(cell[0], Felt::new(6), "Cell (0,0) should be HIT (6)");
 
     // Verify ships_hit_count
     let opp = account.storage().get_item(&opponent_slot()).unwrap();
@@ -420,7 +415,7 @@ async fn test_shot_note_hit_creates_result_note() -> anyhow::Result<()> {
 async fn test_challenge_accept_handshake() -> anyhow::Result<()> {
     let pkgs = build_note_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     let game_id = Word::from([Felt::new(10), Felt::new(20), Felt::new(30), Felt::new(40)]);
     let a_commitment = Word::from([Felt::new(100), Felt::new(200), Felt::new(300), Felt::new(400)]);
@@ -438,7 +433,7 @@ async fn test_challenge_accept_handshake() -> anyhow::Result<()> {
 
     // A sets up board: stores B as opponent
     let a_setup_inputs = build_setup_inputs(
-        game_id, b_prefix.as_int(), b_suffix.as_int(), a_commitment, &classic_ship_cells(),
+        game_id, b_prefix.as_canonical_u64(), b_suffix.as_canonical_u64(), a_commitment, &classic_ship_cells(),
     );
     let a_setup_note = create_testing_note_from_package(
         pkgs.setup_note.clone(), sender.id(),
@@ -447,7 +442,7 @@ async fn test_challenge_accept_handshake() -> anyhow::Result<()> {
 
     // B sets up board: stores A as opponent
     let b_setup_inputs = build_setup_inputs(
-        game_id, a_prefix.as_int(), a_suffix.as_int(), b_commitment, &classic_ship_cells(),
+        game_id, a_prefix.as_canonical_u64(), a_suffix.as_canonical_u64(), b_commitment, &classic_ship_cells(),
     );
     let b_setup_note = create_testing_note_from_package(
         pkgs.setup_note.clone(), sender.id(),
@@ -478,10 +473,10 @@ async fn test_challenge_accept_handshake() -> anyhow::Result<()> {
 
     builder.add_account(account_a.clone())?;
     builder.add_account(account_b.clone())?;
-    builder.add_output_note(OutputNote::Full(a_setup_note.clone()));
-    builder.add_output_note(OutputNote::Full(b_setup_note.clone()));
-    builder.add_output_note(OutputNote::Full(challenge_note.clone()));
-    builder.add_output_note(OutputNote::Full(accept_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(a_setup_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(b_setup_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(challenge_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(accept_note.clone()));
     let mut mock_chain = builder.build()?;
 
     // Step 1: A sets up board -> CHALLENGED
@@ -528,7 +523,7 @@ async fn test_challenge_accept_handshake() -> anyhow::Result<()> {
 async fn test_reveal_note_flow() -> anyhow::Result<()> {
     let pkgs = build_note_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
     let (mut account, setup_notes) = create_active_account(
@@ -551,9 +546,9 @@ async fn test_reveal_note_flow() -> anyhow::Result<()> {
         },
     )?;
 
-    builder.add_output_note(OutputNote::Full(enter_reveal.clone()));
-    builder.add_output_note(OutputNote::Full(mark_reveal.clone()));
-    builder.add_output_note(OutputNote::Full(reveal_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(enter_reveal.clone()));
+    builder.add_output_note(RawOutputNote::Full(mark_reveal.clone()));
+    builder.add_output_note(RawOutputNote::Full(reveal_note.clone()));
     let mut mock_chain = builder.build()?;
 
     // Setup + accept -> ACTIVE

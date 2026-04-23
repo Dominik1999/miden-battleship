@@ -22,8 +22,8 @@ struct ActionNote;
 impl ActionNote {
     #[note_script]
     fn run(self, _arg: Word) {
-        let inputs = active_note::get_inputs();
-        let action = inputs[0].as_u64();
+        let inputs = active_note::get_storage();
+        let action = inputs[0].as_canonical_u64();
 
         if action == 1 {
             // process_shot(row, col, turn) -> encoded_result

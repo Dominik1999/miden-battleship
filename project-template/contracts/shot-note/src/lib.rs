@@ -27,7 +27,7 @@ struct ShotNote;
 impl ShotNote {
     #[note_script]
     fn run(self, _arg: Word) {
-        let inputs = active_note::get_inputs();
+        let inputs = active_note::get_storage();
 
         let row = inputs[0];
         let col = inputs[1];
@@ -38,22 +38,20 @@ impl ShotNote {
 
         // Build result-note recipient
         let serial_num = Word::from([inputs[3], inputs[4], inputs[5], inputs[6]]);
-        let script_root = Digest::from_word(Word::from([
-            inputs[7], inputs[8], inputs[9], inputs[10],
-        ]));
+        let script_root = Word::from([inputs[7], inputs[8], inputs[9], inputs[10]]);
         let shooter_prefix = inputs[11];
         let shooter_suffix = inputs[12];
         let shooter_tag = inputs[13];
 
         // Result-note inputs: [shooter_prefix, shooter_suffix, turn, encoded_result]
-        let recipient = Recipient::compute(
+        let recipient = note::build_recipient(
             serial_num,
             script_root,
             vec![shooter_prefix, shooter_suffix, turn, encoded_result],
         );
 
         let tag = Tag::from(shooter_tag);
-        let note_type = NoteType::from(Felt::from_u64_unchecked(1)); // Public
+        let note_type = NoteType::from(Felt::new(1)); // Public
 
         let _note_idx = output_note::create(tag, note_type, recipient);
     }

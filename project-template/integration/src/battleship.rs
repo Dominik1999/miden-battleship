@@ -23,25 +23,25 @@ pub const PHASE_COMPLETE: u64 = 4;
 // ============================================================================
 
 pub fn board_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::my_board").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::my_board").unwrap()
 }
 pub fn game_config_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::game_config").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::game_config").unwrap()
 }
 pub fn opponent_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::opponent").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::opponent").unwrap()
 }
 pub fn board_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::board_commitment").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::board_commitment").unwrap()
 }
 pub fn opponent_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::opponent_commitment").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::opponent_commitment").unwrap()
 }
 pub fn game_id_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::game_id").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::game_id").unwrap()
 }
 pub fn reveal_status_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::reveal_status").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::reveal_status").unwrap()
 }
 
 // ============================================================================
@@ -135,8 +135,8 @@ pub fn build_all_packages() -> anyhow::Result<AllPackages> {
 
 /// Get the MAST root (script root) of a compiled note package.
 pub fn get_note_script_root(pkg: &miden_mast_package::Package) -> Word {
-    let program = pkg.unwrap_program();
-    let script = NoteScript::from_parts(program.mast_forest().clone(), program.entrypoint());
+    
+    let script = NoteScript::from_library(&pkg.mast).expect("from_library");
     script.root()
 }
 
@@ -161,12 +161,12 @@ impl GameState {
         let opp = account.storage().get_item(&opponent_slot()).unwrap();
         let reveal = account.storage().get_item(&reveal_status_slot()).unwrap();
         Self {
-            phase: config[2].as_int(),
-            expected_turn: config[3].as_int(),
-            ships_hit_count: opp[2].as_int(),
-            total_shots_received: opp[3].as_int(),
-            my_revealed: reveal[0].as_int(),
-            opponent_verified: reveal[1].as_int(),
+            phase: config[2].as_canonical_u64(),
+            expected_turn: config[3].as_canonical_u64(),
+            ships_hit_count: opp[2].as_canonical_u64(),
+            total_shots_received: opp[3].as_canonical_u64(),
+            my_revealed: reveal[0].as_canonical_u64(),
+            opponent_verified: reveal[1].as_canonical_u64(),
         }
     }
 

@@ -4,15 +4,17 @@ use integration::helpers::{
 };
 
 use miden_client::{
+    auth::AuthScheme,
     account::{
         component::NoAuth, Account, AccountBuilder, AccountId, StorageMap, StorageSlot,
         StorageSlotName,
     },
-    note::{Note, NoteInputs, NoteMetadata, NoteRecipient, NoteScript, NoteTag, NoteType},
+    note::{Note, NoteStorage, NoteMetadata, NoteRecipient, NoteScript, NoteTag, NoteType},
     transaction::OutputNote,
     Felt, Word,
 };
 use miden_testing::{Auth, MockChain};
+use miden_protocol::transaction::RawOutputNote;
 use std::{path::Path, sync::Arc};
 
 // ============================================================================
@@ -20,25 +22,25 @@ use std::{path::Path, sync::Arc};
 // ============================================================================
 
 fn board_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::my_board").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::my_board").unwrap()
 }
 fn game_config_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::game_config").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::game_config").unwrap()
 }
 fn opponent_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::opponent").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::opponent").unwrap()
 }
 fn board_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::board_commitment").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::board_commitment").unwrap()
 }
 fn opponent_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::opponent_commitment").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::opponent_commitment").unwrap()
 }
 fn game_id_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::game_id").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::game_id").unwrap()
 }
 fn reveal_status_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::reveal_status").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::reveal_status").unwrap()
 }
 
 fn all_storage_slots() -> Vec<StorageSlot> {
@@ -109,8 +111,8 @@ fn build_all_packages() -> anyhow::Result<AllPackages> {
 }
 
 fn get_note_script_root(pkg: &miden_mast_package::Package) -> Word {
-    let program = pkg.unwrap_program();
-    let script = NoteScript::from_parts(program.mast_forest().clone(), program.entrypoint());
+    
+    let script = NoteScript::from_library(&pkg.mast).expect("from_library");
     script.root()
 }
 
@@ -161,7 +163,7 @@ async fn execute_shot_with_result(
 ) -> anyhow::Result<usize> {
     let tx_context = mock_chain
         .build_tx_context(account.id(), &[shot_note.id()], &[])?
-        .extend_expected_output_notes(vec![OutputNote::Full(expected_result_note)])
+        .extend_expected_output_notes(vec![RawOutputNote::Full(expected_result_note)])
         .build()?;
     let executed = tx_context.execute().await?;
     let num_output = executed.output_notes().num_notes();
@@ -181,11 +183,10 @@ fn build_expected_result_note(
     encoded_result: Felt,
     tag: NoteTag,
 ) -> anyhow::Result<Note> {
-    let program = result_note_pkg.unwrap_program();
-    let script = NoteScript::from_parts(program.mast_forest().clone(), program.entrypoint());
-    let inputs = NoteInputs::new(vec![shooter_prefix, shooter_suffix, turn, encoded_result])?;
+    let script = NoteScript::from_library(&result_note_pkg.mast).expect("from_library");
+    let inputs = NoteStorage::new(vec![shooter_prefix, shooter_suffix, turn, encoded_result])?;
     let recipient = NoteRecipient::new(serial_num, script, inputs);
-    let metadata = NoteMetadata::new(sender_id, NoteType::Public, tag);
+    let metadata = NoteMetadata::new(sender_id, NoteType::Public).with_tag(tag);
     Ok(Note::new(Default::default(), metadata, recipient))
 }
 
@@ -215,7 +216,7 @@ fn make_action_note(
 async fn test_victory_detection_17th_hit() -> anyhow::Result<()> {
     let pkgs = build_all_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     // Set up defender (B) in ACTIVE state
     let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
@@ -240,8 +241,8 @@ async fn test_victory_detection_17th_hit() -> anyhow::Result<()> {
     let accept_note = make_action_note(&pkgs.action_note, sender.id(), accept_inputs, 2)?;
 
     builder.add_account(defender.clone())?;
-    builder.add_output_note(OutputNote::Full(setup_note.clone()));
-    builder.add_output_note(OutputNote::Full(accept_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(setup_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(accept_note.clone()));
 
     // Pre-create all 17 shot notes (one per ship cell)
     // Turns for defender: 1, 3, 5, 7, ... (odd turns, since accept_challenge sets expected_turn=1)
@@ -268,7 +269,7 @@ async fn test_victory_detection_17th_hit() -> anyhow::Result<()> {
                 ..Default::default()
             },
         )?;
-        builder.add_output_note(OutputNote::Full(shot_note.clone()));
+        builder.add_output_note(RawOutputNote::Full(shot_note.clone()));
         shot_notes.push((shot_note, turn, serial, i));
     }
 
@@ -324,7 +325,7 @@ async fn test_victory_detection_17th_hit() -> anyhow::Result<()> {
 async fn test_full_game_a_wins() -> anyhow::Result<()> {
     let pkgs = build_all_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     let game_id = Word::from([Felt::new(10), Felt::new(20), Felt::new(30), Felt::new(40)]);
     let a_commitment = Word::from([Felt::new(100), Felt::new(200), Felt::new(300), Felt::new(400)]);
@@ -343,14 +344,14 @@ async fn test_full_game_a_wins() -> anyhow::Result<()> {
     let a_setup = create_testing_note_from_package(
         pkgs.setup_note.clone(), sender.id(),
         NoteCreationConfig {
-            inputs: build_setup_inputs(game_id, b_prefix.as_int(), b_suffix.as_int(), a_commitment, &classic_ship_cells()),
+            inputs: build_setup_inputs(game_id, b_prefix.as_canonical_u64(), b_suffix.as_canonical_u64(), a_commitment, &classic_ship_cells()),
             tag: NoteTag::new(1), ..Default::default()
         },
     )?;
     let b_setup = create_testing_note_from_package(
         pkgs.setup_note.clone(), sender.id(),
         NoteCreationConfig {
-            inputs: build_setup_inputs(game_id, a_prefix.as_int(), a_suffix.as_int(), b_commitment, &classic_ship_cells()),
+            inputs: build_setup_inputs(game_id, a_prefix.as_canonical_u64(), a_suffix.as_canonical_u64(), b_commitment, &classic_ship_cells()),
             tag: NoteTag::new(2), ..Default::default()
         },
     )?;
@@ -383,10 +384,10 @@ async fn test_full_game_a_wins() -> anyhow::Result<()> {
 
     builder.add_account(account_a.clone())?;
     builder.add_account(account_b.clone())?;
-    builder.add_output_note(OutputNote::Full(a_setup.clone()));
-    builder.add_output_note(OutputNote::Full(b_setup.clone()));
-    builder.add_output_note(OutputNote::Full(challenge_note.clone()));
-    builder.add_output_note(OutputNote::Full(accept_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(a_setup.clone()));
+    builder.add_output_note(RawOutputNote::Full(b_setup.clone()));
+    builder.add_output_note(RawOutputNote::Full(challenge_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(accept_note.clone()));
 
     // ── Pre-create all 17 shot-notes (A fires at B's ship cells) ──
     let ship_cells = classic_ship_cells();
@@ -411,7 +412,7 @@ async fn test_full_game_a_wins() -> anyhow::Result<()> {
                 ..Default::default()
             },
         )?;
-        builder.add_output_note(OutputNote::Full(shot_note.clone()));
+        builder.add_output_note(RawOutputNote::Full(shot_note.clone()));
         shot_notes.push((shot_note, turn, serial, i));
     }
 
@@ -437,11 +438,11 @@ async fn test_full_game_a_wins() -> anyhow::Result<()> {
         },
     )?;
 
-    builder.add_output_note(OutputNote::Full(a_enter_reveal.clone()));
-    builder.add_output_note(OutputNote::Full(a_mark_reveal.clone()));
-    builder.add_output_note(OutputNote::Full(b_mark_reveal.clone()));
-    builder.add_output_note(OutputNote::Full(a_reveal_note.clone()));
-    builder.add_output_note(OutputNote::Full(b_reveal_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(a_enter_reveal.clone()));
+    builder.add_output_note(RawOutputNote::Full(a_mark_reveal.clone()));
+    builder.add_output_note(RawOutputNote::Full(b_mark_reveal.clone()));
+    builder.add_output_note(RawOutputNote::Full(a_reveal_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(b_reveal_note.clone()));
 
     let mut mock_chain = builder.build()?;
 

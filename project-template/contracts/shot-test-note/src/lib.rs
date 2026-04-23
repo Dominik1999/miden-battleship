@@ -14,7 +14,7 @@ struct ShotTestNote;
 impl ShotTestNote {
     #[note_script]
     fn run(self, _arg: Word) {
-        let inputs = active_note::get_inputs();
+        let inputs = active_note::get_storage();
         let _result = battleship_account::process_shot(inputs[0], inputs[1], inputs[2]);
     }
 }

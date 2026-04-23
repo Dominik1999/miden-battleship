@@ -20,7 +20,7 @@ struct SetupNote;
 impl SetupNote {
     #[note_script]
     fn run(self, _arg: Word) {
-        let inputs = active_note::get_inputs();
+        let inputs = active_note::get_storage();
 
         // Place 17 ship cells
         // Unrolled loop to avoid potential issues with control flow compilation

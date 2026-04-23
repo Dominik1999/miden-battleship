@@ -35,7 +35,7 @@ async fn publish_note(
     note: miden_client::note::Note,
 ) -> Result<()> {
     let request = TransactionRequestBuilder::new()
-        .own_output_notes(vec![OutputNote::Full(note)])
+        .own_output_notes(vec![note])
         .build()
         .context("Failed to build publish request")?;
     client
@@ -85,10 +85,10 @@ async fn main() -> Result<()> {
     // Get result_script_root for frontend config
     let result_script_root = get_note_script_root(&pkgs.result_note);
     println!("  result_script_root: [{}, {}, {}, {}]",
-        result_script_root[0].as_int(),
-        result_script_root[1].as_int(),
-        result_script_root[2].as_int(),
-        result_script_root[3].as_int(),
+        result_script_root[0].as_canonical_u64(),
+        result_script_root[1].as_canonical_u64(),
+        result_script_root[2].as_canonical_u64(),
+        result_script_root[3].as_canonical_u64(),
     );
 
     // ── Create accounts ──
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
     let a_setup_note = create_note_from_package(
         &mut client, pkgs.setup_note.clone(), sender.id(),
         NoteCreationConfig {
-            inputs: build_setup_inputs(game_id, b_prefix.as_int(), b_suffix.as_int(), a_commitment, &classic_ship_cells()),
+            inputs: build_setup_inputs(game_id, b_prefix.as_canonical_u64(), b_suffix.as_canonical_u64(), a_commitment, &classic_ship_cells()),
             tag: NoteTag::new(1),
             ..Default::default()
         },
@@ -134,7 +134,7 @@ async fn main() -> Result<()> {
     let b_setup_note = create_note_from_package(
         &mut client, pkgs.setup_note.clone(), sender.id(),
         NoteCreationConfig {
-            inputs: build_setup_inputs(game_id, a_prefix.as_int(), a_suffix.as_int(), b_commitment, &classic_ship_cells()),
+            inputs: build_setup_inputs(game_id, a_prefix.as_canonical_u64(), a_suffix.as_canonical_u64(), b_commitment, &classic_ship_cells()),
             tag: NoteTag::new(2),
             ..Default::default()
         },
@@ -186,10 +186,10 @@ async fn main() -> Result<()> {
     println!("GAME_ACCOUNT_A = \"{}\";", account_a.id().to_bech32(NetworkId::Testnet));
     println!("GAME_ACCOUNT_B = \"{}\";", account_b.id().to_bech32(NetworkId::Testnet));
     println!("RESULT_SCRIPT_ROOT = [{}, {}, {}, {}]n;",
-        result_script_root[0].as_int(),
-        result_script_root[1].as_int(),
-        result_script_root[2].as_int(),
-        result_script_root[3].as_int(),
+        result_script_root[0].as_canonical_u64(),
+        result_script_root[1].as_canonical_u64(),
+        result_script_root[2].as_canonical_u64(),
+        result_script_root[3].as_canonical_u64(),
     );
 
     println!("\n=== DEPLOYMENT COMPLETE ===");

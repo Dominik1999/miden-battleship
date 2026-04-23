@@ -4,6 +4,7 @@ use integration::helpers::{
 };
 
 use miden_client::{
+    auth::AuthScheme,
     account::{
         component::NoAuth, Account, AccountBuilder, StorageMap, StorageSlot, StorageSlotName,
     },
@@ -12,6 +13,7 @@ use miden_client::{
     Felt, Word,
 };
 use miden_testing::{Auth, MockChain};
+use miden_protocol::transaction::RawOutputNote;
 use std::{path::Path, sync::Arc};
 
 // ============================================================================
@@ -19,25 +21,25 @@ use std::{path::Path, sync::Arc};
 // ============================================================================
 
 fn board_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::my_board").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::my_board").unwrap()
 }
 fn game_config_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::game_config").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::game_config").unwrap()
 }
 fn opponent_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::opponent").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::opponent").unwrap()
 }
 fn board_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::board_commitment").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::board_commitment").unwrap()
 }
 fn opponent_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::opponent_commitment").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::opponent_commitment").unwrap()
 }
 fn game_id_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::game_id").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::game_id").unwrap()
 }
 fn reveal_status_slot() -> StorageSlotName {
-    StorageSlotName::new("miden::component::miden_battleship_account::reveal_status").unwrap()
+    StorageSlotName::new("miden_battleship_account::battleship_account::reveal_status").unwrap()
 }
 
 fn all_storage_slots() -> Vec<StorageSlot> {
@@ -174,8 +176,8 @@ async fn create_active_account(
     let accept_note = make_action_note(&pkgs.action_note, sender_id, accept_inputs, tag_base + 1)?;
 
     builder.add_account(account.clone())?;
-    builder.add_output_note(OutputNote::Full(setup_note.clone()));
-    builder.add_output_note(OutputNote::Full(accept_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(setup_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(accept_note.clone()));
 
     Ok((account, vec![setup_note, accept_note]))
 }
@@ -200,7 +202,7 @@ async fn setup_active_account(
 async fn test_wrong_turn_number_rejected() -> anyhow::Result<()> {
     let pkgs = build_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     let (mut account, setup_notes) = create_active_account(
         &pkgs, &mut builder, sender.id(), [1u8; 32], 100,
@@ -215,7 +217,7 @@ async fn test_wrong_turn_number_rejected() -> anyhow::Result<()> {
             ..Default::default()
         },
     )?;
-    builder.add_output_note(OutputNote::Full(shot_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(shot_note.clone()));
     let mut mock_chain = builder.build()?;
 
     setup_active_account(&mut mock_chain, &mut account, setup_notes).await?;
@@ -235,7 +237,7 @@ async fn test_wrong_turn_number_rejected() -> anyhow::Result<()> {
 async fn test_duplicate_cell_rejected() -> anyhow::Result<()> {
     let pkgs = build_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     let (mut account, setup_notes) = create_active_account(
         &pkgs, &mut builder, sender.id(), [1u8; 32], 100,
@@ -259,8 +261,8 @@ async fn test_duplicate_cell_rejected() -> anyhow::Result<()> {
             ..Default::default()
         },
     )?;
-    builder.add_output_note(OutputNote::Full(shot1.clone()));
-    builder.add_output_note(OutputNote::Full(shot2.clone()));
+    builder.add_output_note(RawOutputNote::Full(shot1.clone()));
+    builder.add_output_note(RawOutputNote::Full(shot2.clone()));
     let mut mock_chain = builder.build()?;
 
     setup_active_account(&mut mock_chain, &mut account, setup_notes).await?;
@@ -284,7 +286,7 @@ async fn test_duplicate_cell_rejected() -> anyhow::Result<()> {
 async fn test_shot_wrong_phase_rejected() -> anyhow::Result<()> {
     let pkgs = build_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     // Account in CHALLENGED phase (not ACTIVE)
     let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
@@ -308,8 +310,8 @@ async fn test_shot_wrong_phase_rejected() -> anyhow::Result<()> {
     )?;
 
     builder.add_account(account.clone())?;
-    builder.add_output_note(OutputNote::Full(setup_note.clone()));
-    builder.add_output_note(OutputNote::Full(shot_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(setup_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(shot_note.clone()));
     let mut mock_chain = builder.build()?;
 
     // Setup board → CHALLENGED
@@ -332,7 +334,7 @@ async fn test_shot_wrong_phase_rejected() -> anyhow::Result<()> {
 async fn test_enter_reveal_wrong_phase_rejected() -> anyhow::Result<()> {
     let pkgs = build_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     // Account in CHALLENGED phase
     let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
@@ -348,8 +350,8 @@ async fn test_enter_reveal_wrong_phase_rejected() -> anyhow::Result<()> {
     let enter_reveal = make_action_note(&pkgs.action_note, sender.id(), vec![Felt::new(4)], 200)?;
 
     builder.add_account(account.clone())?;
-    builder.add_output_note(OutputNote::Full(setup_note.clone()));
-    builder.add_output_note(OutputNote::Full(enter_reveal.clone()));
+    builder.add_output_note(RawOutputNote::Full(setup_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(enter_reveal.clone()));
     let mut mock_chain = builder.build()?;
 
     execute_note_on_account(&mut mock_chain, &mut account, setup_note).await?;
@@ -370,7 +372,7 @@ async fn test_enter_reveal_wrong_phase_rejected() -> anyhow::Result<()> {
 async fn test_wrong_commitment_reveal_rejected() -> anyhow::Result<()> {
     let pkgs = build_packages()?;
     let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth)?;
+    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
 
     let (mut account, setup_notes) = create_active_account(
         &pkgs, &mut builder, sender.id(), [1u8; 32], 100,
@@ -390,8 +392,8 @@ async fn test_wrong_commitment_reveal_rejected() -> anyhow::Result<()> {
         },
     )?;
 
-    builder.add_output_note(OutputNote::Full(enter_reveal.clone()));
-    builder.add_output_note(OutputNote::Full(reveal_note.clone()));
+    builder.add_output_note(RawOutputNote::Full(enter_reveal.clone()));
+    builder.add_output_note(RawOutputNote::Full(reveal_note.clone()));
     let mut mock_chain = builder.build()?;
 
     setup_active_account(&mut mock_chain, &mut account, setup_notes).await?;

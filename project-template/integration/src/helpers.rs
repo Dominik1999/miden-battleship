@@ -6,15 +6,15 @@ use anyhow::{bail, Context, Result};
 use cargo_miden::{run, OutputType};
 use miden_client::{
     account::{
-        component::{AccountComponentMetadata, AuthFalcon512Rpo, BasicWallet, NoAuth},
+        component::{AccountComponentMetadata, AuthSingleSig, BasicWallet, NoAuth},
         Account, AccountBuilder, AccountComponent, AccountId, AccountStorageMode, AccountType,
         StorageSlot,
     },
-    auth::{AuthSecretKey, PublicKeyCommitment},
+    auth::{AuthScheme, AuthSecretKey, PublicKeyCommitment},
     builder::ClientBuilder,
     crypto::{rpo_falcon512::SecretKey, FeltRng},
-    keystore::FilesystemKeyStore,
-    note::{Note, NoteInputs, NoteMetadata, NoteRecipient, NoteScript, NoteTag, NoteType},
+    keystore::{FilesystemKeyStore, Keystore},
+    note::{Note, NoteMetadata, NoteRecipient, NoteScript, NoteStorage, NoteTag, NoteType},
     rpc::{Endpoint, GrpcClient},
     utils::Deserializable,
     Client, Word,
@@ -159,21 +159,12 @@ pub fn account_component_from_package(
             let metadata = AccountComponentMetadata::read_from_bytes(bytes)
                 .context("Failed to deserialize account component metadata")?;
 
-            let component = AccountComponent::new(
-                package.unwrap_library().as_ref().clone(),
+            AccountComponent::new(
+                package.mast.as_ref().clone(),
                 config.storage_slots.clone(),
+                metadata,
             )
             .context("Failed to create account component")?
-            .with_metadata(metadata);
-
-            // Use supported types from config if provided, otherwise default to RegularAccountImmutableCode
-            let supported_types = if let Some(types) = &config.supported_types {
-                BTreeSet::from_iter(types.clone())
-            } else {
-                BTreeSet::from_iter([AccountType::RegularAccountImmutableCode])
-            };
-
-            component.with_supported_types(supported_types)
         }
     };
 
@@ -278,17 +269,14 @@ pub fn create_note_from_package(
     sender_id: AccountId,
     config: NoteCreationConfig,
 ) -> Result<Note> {
-    let note_program = package.unwrap_program();
-    let note_script = NoteScript::from_parts(
-        note_program.mast_forest().clone(),
-        note_program.entrypoint(),
-    );
+    let note_script = NoteScript::from_library(&package.mast)
+        .context("Failed to create note script from library")?;
 
     let serial_num = client.rng().draw_word();
-    let note_inputs = NoteInputs::new(config.inputs).context("Failed to create note inputs")?;
+    let note_inputs = NoteStorage::new(config.inputs).context("Failed to create note inputs")?;
     let recipient = NoteRecipient::new(serial_num, note_script, note_inputs);
 
-    let metadata = NoteMetadata::new(sender_id, config.note_type, config.tag);
+    let metadata = NoteMetadata::new(sender_id, config.note_type).with_tag(config.tag);
 
     Ok(Note::new(config.assets, metadata, recipient))
 }
@@ -298,21 +286,18 @@ pub fn create_testing_note_from_package(
     sender_id: AccountId,
     config: NoteCreationConfig,
 ) -> Result<Note> {
-    let note_program = package.unwrap_program();
-    let note_script = NoteScript::from_parts(
-        note_program.mast_forest().clone(),
-        note_program.entrypoint(),
-    );
+    let note_script = NoteScript::from_library(&package.mast)
+        .context("Failed to create note script from library")?;
 
     // get 4 random u64s and convert them to a word
     let random_u64s = [0_u64; 4];
     let serial_num =
         Word::try_from(random_u64s).context("Failed to convert random u64s to word")?;
 
-    let note_inputs = NoteInputs::new(config.inputs).context("Failed to create note inputs")?;
+    let note_inputs = NoteStorage::new(config.inputs).context("Failed to create note inputs")?;
     let recipient = NoteRecipient::new(serial_num, note_script, note_inputs);
 
-    let metadata = NoteMetadata::new(sender_id, config.note_type, config.tag);
+    let metadata = NoteMetadata::new(sender_id, config.note_type).with_tag(config.tag);
 
     Ok(Note::new(config.assets, metadata, recipient))
 }
@@ -342,9 +327,9 @@ pub async fn create_basic_wallet_account(
     let builder = AccountBuilder::new(init_seed)
         .account_type(config.account_type)
         .storage_mode(config.storage_mode)
-        .with_auth_component(AuthFalcon512Rpo::new(PublicKeyCommitment::from(
+        .with_auth_component(AuthSingleSig::new(PublicKeyCommitment::from(
             key_pair.public_key().to_commitment(),
-        )))
+        ), AuthScheme::Falcon512Poseidon2))
         .with_component(BasicWallet);
 
     let account = builder
@@ -357,7 +342,8 @@ pub async fn create_basic_wallet_account(
         .context("Failed to add account to client")?;
 
     keystore
-        .add_key(&AuthSecretKey::Falcon512Rpo(key_pair))
+        .add_key(&AuthSecretKey::Falcon512Poseidon2(key_pair), account.id())
+        .await
         .context("Failed to add key to keystore")?;
 
     Ok(account)
@@ -416,9 +402,9 @@ pub async fn create_authenticated_game_account(
         .account_type(config.account_type)
         .storage_mode(config.storage_mode)
         .with_component(account_component)
-        .with_auth_component(AuthFalcon512Rpo::new(PublicKeyCommitment::from(
+        .with_auth_component(AuthSingleSig::new(PublicKeyCommitment::from(
             key_pair.public_key().to_commitment(),
-        )))
+        ), AuthScheme::Falcon512Poseidon2))
         .build()
         .context("Failed to build authenticated game account")?;
 
@@ -428,7 +414,8 @@ pub async fn create_authenticated_game_account(
         .context("Failed to add account to client")?;
 
     keystore
-        .add_key(&AuthSecretKey::Falcon512Rpo(key_pair))
+        .add_key(&AuthSecretKey::Falcon512Poseidon2(key_pair), account.id())
+        .await
         .context("Failed to add key to keystore")?;
 
     Ok(account)

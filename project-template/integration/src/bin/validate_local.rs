@@ -11,8 +11,8 @@ use integration::helpers::*;
 
 use anyhow::{Context, Result};
 use miden_client::{
-    note::{NoteInputs, NoteRecipient, NoteScript, NoteTag},
-    transaction::{OutputNote, TransactionRequestBuilder},
+    note::{NoteRecipient, NoteScript, NoteStorage, NoteTag},
+    transaction::TransactionRequestBuilder,
     Felt, Word,
 };
 use std::path::Path;
@@ -44,7 +44,7 @@ async fn publish_note(
     note: miden_client::note::Note,
 ) -> Result<()> {
     let request = TransactionRequestBuilder::new()
-        .own_output_notes(vec![OutputNote::Full(note)])
+        .own_output_notes(vec![note])
         .build()
         .context("Failed to build publish request")?;
     client
@@ -146,7 +146,7 @@ async fn main() -> Result<()> {
     let a_setup_note = create_note_from_package(
         &mut client, pkgs.setup_note.clone(), sender.id(),
         NoteCreationConfig {
-            inputs: build_setup_inputs(game_id, b_prefix.as_int(), b_suffix.as_int(), a_commitment, &classic_ship_cells()),
+            inputs: build_setup_inputs(game_id, b_prefix.as_canonical_u64(), b_suffix.as_canonical_u64(), a_commitment, &classic_ship_cells()),
             tag: NoteTag::new(1),
             ..Default::default()
         },
@@ -154,7 +154,7 @@ async fn main() -> Result<()> {
     let b_setup_note = create_note_from_package(
         &mut client, pkgs.setup_note.clone(), sender.id(),
         NoteCreationConfig {
-            inputs: build_setup_inputs(game_id, a_prefix.as_int(), a_suffix.as_int(), b_commitment, &classic_ship_cells()),
+            inputs: build_setup_inputs(game_id, a_prefix.as_canonical_u64(), a_suffix.as_canonical_u64(), b_commitment, &classic_ship_cells()),
             tag: NoteTag::new(2),
             ..Default::default()
         },
@@ -210,11 +210,7 @@ async fn main() -> Result<()> {
 
     let ship_cells = classic_ship_cells();
     let result_script_root = get_note_script_root(&pkgs.result_note);
-    let result_program = pkgs.result_note.unwrap_program();
-    let result_script = NoteScript::from_parts(
-        result_program.mast_forest().clone(),
-        result_program.entrypoint(),
-    );
+    let result_script = NoteScript::from_library(&pkgs.result_note.mast).expect("from_library");
 
     for (i, (row, col, _)) in ship_cells.iter().enumerate() {
         let turn = (i as u64) * 2 + 1;
@@ -239,7 +235,7 @@ async fn main() -> Result<()> {
         )?;
 
         // Build expected result-note recipient
-        let result_inputs = NoteInputs::new(vec![a_prefix, a_suffix, Felt::new(turn), encoded_result])?;
+        let result_inputs = NoteStorage::new(vec![a_prefix, a_suffix, Felt::new(turn), encoded_result])?;
         let result_recipient = NoteRecipient::new(serial, result_script.clone(), result_inputs);
 
         publish_note(&mut client, sender.id(), shot_note.clone()).await?;
