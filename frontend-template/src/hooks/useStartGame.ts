@@ -7,7 +7,6 @@ import {
   useMidenClient,
   useNotes,
   useSyncState,
-  useTransaction,
 } from "@miden-sdk/react";
 import { useMidenFiWallet } from "@miden-sdk/miden-wallet-adapter";
 import { AccountId, Address, Felt, NetworkId, NoteTag } from "@miden-sdk/miden-sdk";
@@ -67,12 +66,12 @@ export function useStartGame() {
   const {
     address: walletAddress,
     connected,
+    requestTransaction,
   } = useMidenFiWallet();
   const client = useMidenClient();
   const { runExclusive } = useMiden();
   const { sync } = useSyncState();
   const { importAccount } = useImportAccount();
-  const { execute } = useTransaction();
   const { consume, isLoading: isConsuming } = useConsume();
 
   // Track game account to poll for opponent
@@ -255,7 +254,7 @@ export function useStartGame() {
     if (
       !gameAccountAddress ||
       !walletAddress ||
-      !execute ||
+      !requestTransaction ||
       !deferredRef.current ||
       pendingNotes.length === 0
     ) {
@@ -275,15 +274,6 @@ export function useStartGame() {
     }
 
     try {
-      // Ensure wallet account is tracked in the app's Miden client
-      log("Importing wallet account into app client...");
-      try {
-        await importAccount({ type: "id", accountId: walletAddress });
-        log("Wallet account imported.");
-      } catch (e) {
-        log(`Wallet import note: ${e instanceof Error ? e.message : String(e)}`);
-      }
-
       // Step 1: Extract joiner info AND game_id from the challenge note
       // Challenge note inputs: [0..3]=game_id, [4]=joiner_prefix, [5]=joiner_suffix, [6..9]=commitment
       const challengeNote = pendingNotes[0];
@@ -308,7 +298,7 @@ export function useStartGame() {
         1,
         walletAddress,
         walletId,
-        execute,
+        requestTransaction as (tx: unknown) => Promise<unknown>,
       );
       log(`Setup note ID: ${setupNoteId}`);
 
@@ -366,7 +356,7 @@ export function useStartGame() {
         4,
         walletAddress,
         walletId,
-        execute,
+        requestTransaction as (tx: unknown) => Promise<unknown>,
       );
 
       log("=== GAME READY ===");

@@ -1,6 +1,9 @@
 import { useState, useCallback } from "react";
-import { useSyncState, useTransaction } from "@miden-sdk/react";
-import { useMidenFiWallet } from "@miden-sdk/miden-wallet-adapter";
+import { useSyncState } from "@miden-sdk/react";
+import {
+  useMidenFiWallet,
+  Transaction,
+} from "@miden-sdk/miden-wallet-adapter";
 import {
   TransactionRequestBuilder,
   Package,
@@ -42,13 +45,12 @@ export function useFireShot(
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isWaiting, setIsWaiting] = useState(false);
-  const { address: walletAddress, connected } = useMidenFiWallet();
+  const { address: walletAddress, connected, requestTransaction } = useMidenFiWallet();
   const { sync } = useSyncState();
-  const { execute } = useTransaction();
 
   const fireShot = useCallback(
     async (row: number, col: number, turn: number) => {
-      if (!walletAddress) {
+      if (!walletAddress || !requestTransaction) {
         log("Not ready: wallet not connected");
         return;
       }
@@ -109,11 +111,13 @@ export function useFireShot(
           .withOwnOutputNotes(new NoteArray([note]))
           .build();
 
-        log("Executing shot via React SDK...");
-        await execute({
-          accountId: walletAddress,
-          request: txRequest,
-        });
+        const tx = Transaction.createCustomTransaction(
+          walletAddress,
+          defenderAddress,
+          txRequest,
+        );
+        log("Submitting shot via wallet...");
+        await requestTransaction(tx);
         log("Shot submitted successfully");
         setIsSubmitting(false);
 
@@ -133,7 +137,7 @@ export function useFireShot(
         setError(msg);
       }
     },
-    [walletAddress, execute, defenderAddress, sync, refetchState],
+    [walletAddress, requestTransaction, defenderAddress, sync, refetchState],
   );
 
   return {
