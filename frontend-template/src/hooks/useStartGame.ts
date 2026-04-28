@@ -374,7 +374,7 @@ export function useStartGame() {
   }, [
     gameAccountAddress,
     walletAddress,
-    execute,
+    requestTransaction,
     pendingNotes,
     consume,
     sync,

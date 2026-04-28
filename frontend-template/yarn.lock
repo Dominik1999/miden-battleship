@@ -637,10 +637,10 @@
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
 
-"@miden-sdk/miden-sdk@0.14.4":
-  version "0.14.4"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-sdk/-/miden-sdk-0.14.4.tgz#be7496e6d2622b7f478768972f9896536db154cb"
-  integrity sha512-Qt+3NfGRCyHP5zcD+m9bBqQz01zuAwZRUBkls09mi+tOPVT17sFWKLglQEtKdr3gPAFHLwz2Ja4Hp4adUKfLuA==
+"@miden-sdk/miden-sdk@0.14.5":
+  version "0.14.5"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-sdk/-/miden-sdk-0.14.5.tgz#78898defd28a3dd841f75c928db31a342e7a7398"
+  integrity sha512-lXaO8mWE6GuaTmTCGtKE6XzDxQl83MMFlYvuuQnWHEcdmnENu1LYG9/WVyCveiJQr2VSMMkhc+lQEaqKhrOvOg==
   dependencies:
     "@rollup/plugin-typescript" "^12.3.0"
     dexie "^4.0.1"
@@ -687,17 +687,17 @@
     "@miden-sdk/miden-wallet-adapter-react" "^0.14.3"
     "@miden-sdk/miden-wallet-adapter-reactui" "^0.14.3"
 
-"@miden-sdk/react@0.14.4":
-  version "0.14.4"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/react/-/react-0.14.4.tgz#6bb6e05572f6a4a63806e580bffc6156658e52f4"
-  integrity sha512-ASTcH1nge7hgH9OcV22nb1nrB9ccdkTsgVIioY+6y2wt0NcnTwu9RGrq8heJu4VyPcnl0g0LVFPcubvkmzXyjw==
+"@miden-sdk/react@0.14.5":
+  version "0.14.5"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/react/-/react-0.14.5.tgz#d527b6c388783238553b15c70f5a4a5bbe09821d"
+  integrity sha512-j8uHdmUVitQZ9yP2sRsbNulDy6Mf8pjfRyWMt7eQ9r3fvaQuc7R2iKJuOMcgvMVrhn0nWrCXxgeRwzts9L+ogQ==
   dependencies:
     zustand "^5.0.0"
 
-"@miden-sdk/vite-plugin@0.14.4":
-  version "0.14.4"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/vite-plugin/-/vite-plugin-0.14.4.tgz#b6d4b45f60120c2c65ba5afdf47cef9ec7e8077d"
-  integrity sha512-E9y0dJVsrWzgoB06y9+8MibOjzoS37apBwbTa9AEloaFPPOxsJnlrprZG2dbm2xwhc3HQNzVRI9NkJ1ijFpALQ==
+"@miden-sdk/vite-plugin@0.14.5":
+  version "0.14.5"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/vite-plugin/-/vite-plugin-0.14.5.tgz#7fdd323c418fe8042521009aa00bf9cccadbc0cb"
+  integrity sha512-7F8HQrtqT+K2b2oYv0sJ5tYBV091bE0yBYZBlsR7uRzsXrWKBfknDPRzlu+jNhFJKwlggKNGZrPoreTXb4qNoA==
 
 "@rolldown/pluginutils@1.0.0-beta.27":
   version "1.0.0-beta.27"
