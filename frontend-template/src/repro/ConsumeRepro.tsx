@@ -19,7 +19,6 @@ import {
   useConsume,
   useMiden,
   useMidenClient,
-  useNotes,
   useSyncState,
 } from "@miden-sdk/react";
 import {
@@ -28,7 +27,6 @@ import {
 } from "@miden-sdk/miden-wallet-adapter";
 import {
   TransactionRequestBuilder,
-  NoteScript,
   Note,
   NoteAssets,
   NoteMetadata,
@@ -157,39 +155,11 @@ export function ConsumeRepro() {
       await requestTransaction(tx);
       log("Note submitted successfully!");
 
-      // --- Step 3: Sync until note appears ---
-      log("Step 3: Syncing (waiting for note to appear on-chain)...");
-      let found = false;
-      for (let i = 1; i <= 8; i++) {
-        await new Promise((r) => setTimeout(r, 10_000));
-        await sync();
-        log(`Sync #${i} complete`);
-
-        // Check if the note is now consumable
-        try {
-          const notes = await runExclusive(() => client.getInputNotes("All"));
-          const matching = [];
-          for (let j = 0; j < notes.len(); j++) {
-            if (notes.get(j).id().toString() === noteId) {
-              matching.push(notes.get(j));
-            }
-          }
-          if (matching.length > 0) {
-            log(`Note found in local store after sync #${i}`);
-            found = true;
-            break;
-          }
-        } catch {
-          // getInputNotes might not exist or have different API
-          log(`(Could not query notes directly, will try consume anyway)`);
-          found = true;
-          break;
-        }
-      }
-
-      if (!found) {
-        log("Note not found after 8 syncs — trying consume anyway...");
-      }
+      // --- Step 3: Wait for note to propagate, then sync ---
+      log("Step 3: Waiting 15s for note to appear on-chain, then syncing...");
+      await new Promise((r) => setTimeout(r, 15_000));
+      await sync();
+      log("Sync complete");
 
       // --- Step 4: Try to consume → expect null pointer ---
       log("Step 4: Calling consume({ accountId, notes: [noteId] })...");
