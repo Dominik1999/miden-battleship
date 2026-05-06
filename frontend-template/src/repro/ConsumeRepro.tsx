@@ -18,7 +18,6 @@ import { useState, useCallback } from "react";
 import {
   useConsume,
   useMiden,
-  useMidenClient,
   useSyncState,
 } from "@miden-sdk/react";
 import {
@@ -60,8 +59,7 @@ export function ConsumeRepro() {
   const [running, setRunning] = useState(false);
 
   const { address: walletAddress, requestTransaction } = useMidenFiWallet();
-  const client = useMidenClient();
-  const { runExclusive, isReady } = useMiden();
+  const { runExclusive, isReady, client } = useMiden();
   const { sync } = useSyncState();
   const { consume } = useConsume();
 
@@ -72,7 +70,7 @@ export function ConsumeRepro() {
   }, []);
 
   const run = useCallback(async () => {
-    if (!walletAddress || !requestTransaction || !client || !isReady) {
+    if (!walletAddress || !requestTransaction || !isReady || !client) {
       log("Not ready — connect wallet first", true);
       return;
     }
