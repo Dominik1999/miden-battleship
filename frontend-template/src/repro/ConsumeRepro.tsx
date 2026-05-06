@@ -182,7 +182,7 @@ export function ConsumeRepro() {
   }, [walletAddress, requestTransaction, client, isReady, runExclusive, sync, consume, log]);
 
   return (
-    <div style={{ padding: 20, fontFamily: "monospace", maxWidth: 800 }}>
+    <div style={{ padding: 40, fontFamily: "monospace", maxWidth: 800, margin: "0 auto", background: "#1a1a2e", color: "#eee", minHeight: "100vh", position: "fixed", top: 0, left: 0, right: 0, bottom: 0, zIndex: 9999, overflow: "auto" }}>
       <h2>Consume Repro: No-Auth Account Bug</h2>
       <p>SDK: @miden-sdk/miden-sdk 0.14.5</p>
       <p>Wallet: {walletAddress ?? "not connected"}</p>
