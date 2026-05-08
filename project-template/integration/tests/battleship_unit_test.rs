@@ -5,7 +5,7 @@ use integration::helpers::{
 
 use miden_client::{
     auth::AuthScheme,
-    account::{Account, AccountId, StorageMap, StorageSlot, StorageSlotName},
+    account::{Account, AccountId, StorageSlot, StorageSlotName},
     note::NoteTag,
     transaction::OutputNote,
     Felt, Word,
@@ -15,8 +15,21 @@ use miden_protocol::transaction::RawOutputNote;
 use std::{path::Path, sync::Arc};
 
 // Storage slot names
-fn board_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::my_board").unwrap()
+fn board_row_slot(n: u32) -> StorageSlotName {
+    let name = match n {
+        0 => "miden_battleship_account::battleship_account::board_row_0",
+        1 => "miden_battleship_account::battleship_account::board_row_1",
+        2 => "miden_battleship_account::battleship_account::board_row_2",
+        3 => "miden_battleship_account::battleship_account::board_row_3",
+        4 => "miden_battleship_account::battleship_account::board_row_4",
+        5 => "miden_battleship_account::battleship_account::board_row_5",
+        6 => "miden_battleship_account::battleship_account::board_row_6",
+        7 => "miden_battleship_account::battleship_account::board_row_7",
+        8 => "miden_battleship_account::battleship_account::board_row_8",
+        9 => "miden_battleship_account::battleship_account::board_row_9",
+        _ => panic!("invalid board row"),
+    };
+    StorageSlotName::new(name).unwrap()
 }
 fn game_config_slot() -> StorageSlotName {
     StorageSlotName::new("miden_battleship_account::battleship_account::game_config").unwrap()
@@ -38,15 +51,18 @@ fn reveal_status_slot() -> StorageSlotName {
 }
 
 fn all_storage_slots() -> Vec<StorageSlot> {
-    vec![
+    let mut slots = vec![
         StorageSlot::with_value(game_config_slot(), Word::default()),
         StorageSlot::with_value(opponent_slot(), Word::default()),
         StorageSlot::with_value(board_commitment_slot(), Word::default()),
         StorageSlot::with_value(opponent_commitment_slot(), Word::default()),
         StorageSlot::with_value(game_id_slot(), Word::default()),
         StorageSlot::with_value(reveal_status_slot(), Word::default()),
-        StorageSlot::with_map(board_slot(), StorageMap::with_entries([]).unwrap()),
-    ]
+    ];
+    for i in 0..10u32 {
+        slots.push(StorageSlot::with_value(board_row_slot(i), Word::default()));
+    }
+    slots
 }
 
 /// Classic ship placement: 17 cells total
@@ -60,7 +76,17 @@ fn classic_ship_cells() -> Vec<(u64, u64, u64)> {
     cells
 }
 
-/// Build 61-Felt inputs for setup-note
+/// Pack ship cells into 10 row values (3 bits per cell)
+fn pack_board(ship_cells: &[(u64, u64, u64)]) -> [u64; 10] {
+    let mut rows = [0u64; 10];
+    for (r, c, ship_id) in ship_cells {
+        let shift = c * 3;
+        rows[*r as usize] |= ship_id << shift;
+    }
+    rows
+}
+
+/// Build 20-Felt inputs for setup-note (packed format)
 fn build_setup_inputs(
     game_id: Word, opp_prefix: u64, opp_suffix: u64,
     commitment: Word, ship_cells: &[(u64, u64, u64)],
@@ -70,12 +96,18 @@ fn build_setup_inputs(
     inputs.push(Felt::new(opp_prefix));
     inputs.push(Felt::new(opp_suffix));
     for f in commitment.iter() { inputs.push(*f); }
-    for (r, c, s) in ship_cells {
-        inputs.push(Felt::new(*r));
-        inputs.push(Felt::new(*c));
-        inputs.push(Felt::new(*s));
+    let packed = pack_board(ship_cells);
+    for row_val in packed.iter() {
+        inputs.push(Felt::new(*row_val));
     }
     inputs
+}
+
+/// Read a single cell from the packed board storage
+fn read_board_cell(account: &Account, row: u32, col: u32) -> u64 {
+    let row_word = account.storage().get_item(&board_row_slot(row)).unwrap();
+    let packed = row_word[0].as_canonical_u64();
+    (packed >> (col as u64 * 3)) & 0x7
 }
 
 struct Packages {
@@ -215,14 +247,10 @@ async fn test_full_board_setup() -> anyhow::Result<()> {
     assert_eq!(stored_opp[1], Felt::new(43));
 
     // Verify ship cell (0,0) = ship_id 1
-    let cell_key = Word::from([Felt::new(0), Felt::new(0), Felt::new(0), Felt::new(0)]);
-    let cell = account.storage().get_map_item(&board_slot(), cell_key).unwrap();
-    assert_eq!(cell, Word::from([Felt::new(1), Felt::new(0), Felt::new(0), Felt::new(0)]));
+    assert_eq!(read_board_cell(&account, 0, 0), 1, "Cell (0,0) should be ship 1");
 
     // Verify water cell (5,5) = 0
-    let water_key = Word::from([Felt::new(0), Felt::new(0), Felt::new(5), Felt::new(5)]);
-    let water = account.storage().get_map_item(&board_slot(), water_key).unwrap();
-    assert_eq!(water, Word::default(), "Unoccupied cell should be water (0)");
+    assert_eq!(read_board_cell(&account, 5, 5), 0, "Unoccupied cell should be water (0)");
 
     println!("test_full_board_setup passed!");
     Ok(())
@@ -361,9 +389,7 @@ async fn test_process_shot_miss() -> anyhow::Result<()> {
     execute_note_on_account(&mut mock_chain, &mut account, shot_note).await?;
 
     // Check cell (5,5) is now MISS (7)
-    let cell_key = Word::from([Felt::new(0), Felt::new(0), Felt::new(5), Felt::new(5)]);
-    let cell = account.storage().get_map_item(&board_slot(), cell_key).unwrap();
-    assert_eq!(cell[0], Felt::new(7), "Cell should be MISS (7)");
+    assert_eq!(read_board_cell(&account, 5, 5), 7, "Cell should be MISS (7)");
 
     // Check total_shots_received incremented
     let opp = account.storage().get_item(&opponent_slot()).unwrap();
@@ -411,9 +437,7 @@ async fn test_process_shot_hit() -> anyhow::Result<()> {
     execute_note_on_account(&mut mock_chain, &mut account, shot_note).await?;
 
     // Check cell (0,0) is now HIT (6)
-    let cell_key = Word::from([Felt::new(0), Felt::new(0), Felt::new(0), Felt::new(0)]);
-    let cell = account.storage().get_map_item(&board_slot(), cell_key).unwrap();
-    assert_eq!(cell[0], Felt::new(6), "Cell should be HIT (6)");
+    assert_eq!(read_board_cell(&account, 0, 0), 6, "Cell should be HIT (6)");
 
     // ships_hit_count should be 1
     let opp = account.storage().get_item(&opponent_slot()).unwrap();

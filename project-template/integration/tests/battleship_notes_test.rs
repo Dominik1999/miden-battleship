@@ -6,7 +6,7 @@ use integration::helpers::{
 use miden_client::{
     auth::AuthScheme,
     account::{
-        component::NoAuth, Account, AccountBuilder, AccountId, StorageMap, StorageSlot,
+        component::NoAuth, Account, AccountBuilder, AccountId, StorageSlot,
         StorageSlotName,
     },
     note::{Note, NoteStorage, NoteMetadata, NoteRecipient, NoteScript, NoteTag, NoteType},
@@ -21,8 +21,21 @@ use std::{path::Path, sync::Arc};
 // Shared helpers (same as unit test — could be extracted to a shared module)
 // ============================================================================
 
-fn board_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::my_board").unwrap()
+fn board_row_slot(n: u32) -> StorageSlotName {
+    let name = match n {
+        0 => "miden_battleship_account::battleship_account::board_row_0",
+        1 => "miden_battleship_account::battleship_account::board_row_1",
+        2 => "miden_battleship_account::battleship_account::board_row_2",
+        3 => "miden_battleship_account::battleship_account::board_row_3",
+        4 => "miden_battleship_account::battleship_account::board_row_4",
+        5 => "miden_battleship_account::battleship_account::board_row_5",
+        6 => "miden_battleship_account::battleship_account::board_row_6",
+        7 => "miden_battleship_account::battleship_account::board_row_7",
+        8 => "miden_battleship_account::battleship_account::board_row_8",
+        9 => "miden_battleship_account::battleship_account::board_row_9",
+        _ => panic!("invalid board row"),
+    };
+    StorageSlotName::new(name).unwrap()
 }
 fn game_config_slot() -> StorageSlotName {
     StorageSlotName::new("miden_battleship_account::battleship_account::game_config").unwrap()
@@ -44,15 +57,18 @@ fn reveal_status_slot() -> StorageSlotName {
 }
 
 fn all_storage_slots() -> Vec<StorageSlot> {
-    vec![
+    let mut slots = vec![
         StorageSlot::with_value(game_config_slot(), Word::default()),
         StorageSlot::with_value(opponent_slot(), Word::default()),
         StorageSlot::with_value(board_commitment_slot(), Word::default()),
         StorageSlot::with_value(opponent_commitment_slot(), Word::default()),
         StorageSlot::with_value(game_id_slot(), Word::default()),
         StorageSlot::with_value(reveal_status_slot(), Word::default()),
-        StorageSlot::with_map(board_slot(), StorageMap::with_entries([]).unwrap()),
-    ]
+    ];
+    for i in 0..10u32 {
+        slots.push(StorageSlot::with_value(board_row_slot(i), Word::default()));
+    }
+    slots
 }
 
 fn classic_ship_cells() -> Vec<(u64, u64, u64)> {
@@ -65,6 +81,15 @@ fn classic_ship_cells() -> Vec<(u64, u64, u64)> {
     cells
 }
 
+fn pack_board(ship_cells: &[(u64, u64, u64)]) -> [u64; 10] {
+    let mut rows = [0u64; 10];
+    for (r, c, ship_id) in ship_cells {
+        let shift = c * 3;
+        rows[*r as usize] |= ship_id << shift;
+    }
+    rows
+}
+
 fn build_setup_inputs(
     game_id: Word, opp_prefix: u64, opp_suffix: u64,
     commitment: Word, ship_cells: &[(u64, u64, u64)],
@@ -74,12 +99,17 @@ fn build_setup_inputs(
     inputs.push(Felt::new(opp_prefix));
     inputs.push(Felt::new(opp_suffix));
     for f in commitment.iter() { inputs.push(*f); }
-    for (r, c, s) in ship_cells {
-        inputs.push(Felt::new(*r));
-        inputs.push(Felt::new(*c));
-        inputs.push(Felt::new(*s));
+    let packed = pack_board(ship_cells);
+    for row_val in packed.iter() {
+        inputs.push(Felt::new(*row_val));
     }
     inputs
+}
+
+fn read_board_cell(account: &Account, row: u32, col: u32) -> u64 {
+    let row_word = account.storage().get_item(&board_row_slot(row)).unwrap();
+    let packed = row_word[0].as_canonical_u64();
+    (packed >> (col as u64 * 3)) & 0x7
 }
 
 async fn create_game_account(pkg: Arc<miden_mast_package::Package>) -> anyhow::Result<Account> {
@@ -314,9 +344,7 @@ async fn test_shot_note_creates_result_note() -> anyhow::Result<()> {
     mock_chain.prove_next_block()?;
 
     // Verify board state was updated (process_shot ran)
-    let cell_key = Word::from([Felt::new(0), Felt::new(0), Felt::new(5), Felt::new(5)]);
-    let cell = account.storage().get_map_item(&board_slot(), cell_key).unwrap();
-    assert_eq!(cell[0], Felt::new(7), "Cell (5,5) should be MISS (7)");
+    assert_eq!(read_board_cell(&account, 5, 5), 7, "Cell (5,5) should be MISS (7)");
 
     // Verify turn advanced
     let config = account.storage().get_item(&game_config_slot()).unwrap();
@@ -392,9 +420,7 @@ async fn test_shot_note_hit_creates_result_note() -> anyhow::Result<()> {
     mock_chain.prove_next_block()?;
 
     // Verify HIT
-    let cell_key = Word::from([Felt::new(0), Felt::new(0), Felt::new(0), Felt::new(0)]);
-    let cell = account.storage().get_map_item(&board_slot(), cell_key).unwrap();
-    assert_eq!(cell[0], Felt::new(6), "Cell (0,0) should be HIT (6)");
+    assert_eq!(read_board_cell(&account, 0, 0), 6, "Cell (0,0) should be HIT (6)");
 
     // Verify ships_hit_count
     let opp = account.storage().get_item(&opponent_slot()).unwrap();

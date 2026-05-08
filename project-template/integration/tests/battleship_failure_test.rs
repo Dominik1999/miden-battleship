@@ -6,7 +6,7 @@ use integration::helpers::{
 use miden_client::{
     auth::AuthScheme,
     account::{
-        component::NoAuth, Account, AccountBuilder, StorageMap, StorageSlot, StorageSlotName,
+        component::NoAuth, Account, AccountBuilder, StorageSlot, StorageSlotName,
     },
     note::{NoteTag, NoteType},
     transaction::OutputNote,
@@ -20,8 +20,21 @@ use std::{path::Path, sync::Arc};
 // Shared helpers
 // ============================================================================
 
-fn board_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::my_board").unwrap()
+fn board_row_slot(n: u32) -> StorageSlotName {
+    let name = match n {
+        0 => "miden_battleship_account::battleship_account::board_row_0",
+        1 => "miden_battleship_account::battleship_account::board_row_1",
+        2 => "miden_battleship_account::battleship_account::board_row_2",
+        3 => "miden_battleship_account::battleship_account::board_row_3",
+        4 => "miden_battleship_account::battleship_account::board_row_4",
+        5 => "miden_battleship_account::battleship_account::board_row_5",
+        6 => "miden_battleship_account::battleship_account::board_row_6",
+        7 => "miden_battleship_account::battleship_account::board_row_7",
+        8 => "miden_battleship_account::battleship_account::board_row_8",
+        9 => "miden_battleship_account::battleship_account::board_row_9",
+        _ => panic!("invalid board row"),
+    };
+    StorageSlotName::new(name).unwrap()
 }
 fn game_config_slot() -> StorageSlotName {
     StorageSlotName::new("miden_battleship_account::battleship_account::game_config").unwrap()
@@ -43,15 +56,18 @@ fn reveal_status_slot() -> StorageSlotName {
 }
 
 fn all_storage_slots() -> Vec<StorageSlot> {
-    vec![
+    let mut slots = vec![
         StorageSlot::with_value(game_config_slot(), Word::default()),
         StorageSlot::with_value(opponent_slot(), Word::default()),
         StorageSlot::with_value(board_commitment_slot(), Word::default()),
         StorageSlot::with_value(opponent_commitment_slot(), Word::default()),
         StorageSlot::with_value(game_id_slot(), Word::default()),
         StorageSlot::with_value(reveal_status_slot(), Word::default()),
-        StorageSlot::with_map(board_slot(), StorageMap::with_entries([]).unwrap()),
-    ]
+    ];
+    for i in 0..10u32 {
+        slots.push(StorageSlot::with_value(board_row_slot(i), Word::default()));
+    }
+    slots
 }
 
 fn classic_ship_cells() -> Vec<(u64, u64, u64)> {
@@ -64,6 +80,15 @@ fn classic_ship_cells() -> Vec<(u64, u64, u64)> {
     cells
 }
 
+fn pack_board(ship_cells: &[(u64, u64, u64)]) -> [u64; 10] {
+    let mut rows = [0u64; 10];
+    for (r, c, ship_id) in ship_cells {
+        let shift = c * 3;
+        rows[*r as usize] |= ship_id << shift;
+    }
+    rows
+}
+
 fn build_setup_inputs(
     game_id: Word, opp_prefix: u64, opp_suffix: u64,
     commitment: Word, ship_cells: &[(u64, u64, u64)],
@@ -73,10 +98,9 @@ fn build_setup_inputs(
     inputs.push(Felt::new(opp_prefix));
     inputs.push(Felt::new(opp_suffix));
     for f in commitment.iter() { inputs.push(*f); }
-    for (r, c, s) in ship_cells {
-        inputs.push(Felt::new(*r));
-        inputs.push(Felt::new(*c));
-        inputs.push(Felt::new(*s));
+    let packed = pack_board(ship_cells);
+    for row_val in packed.iter() {
+        inputs.push(Felt::new(*row_val));
     }
     inputs
 }
