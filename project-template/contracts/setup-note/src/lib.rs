@@ -5,14 +5,14 @@ use miden::*;
 
 use crate::bindings::miden::battleship_account::battleship_account;
 
-/// Setup note for board placement.
+/// Setup note for board placement (packed format).
 ///
-/// Input layout (61 Felts):
+/// Input layout (20 Felts):
 ///   [0..4]   game_id (4 Felts)
 ///   [4]      opponent_prefix
 ///   [5]      opponent_suffix
 ///   [6..10]  commitment (4 Felts, pre-computed by client)
-///   [10..61] ship data: 17 * (row, col, ship_id) = 51 Felts
+///   [10..20] packed_rows (10 Felts, each packs 10 cells at 3 bits)
 #[note]
 struct SetupNote;
 
@@ -22,29 +22,15 @@ impl SetupNote {
     fn run(self, _arg: Word) {
         let inputs = active_note::get_storage();
 
-        // Place 17 ship cells
-        // Unrolled loop to avoid potential issues with control flow compilation
-        battleship_account::place_ship(inputs[10], inputs[11], inputs[12]);
-        battleship_account::place_ship(inputs[13], inputs[14], inputs[15]);
-        battleship_account::place_ship(inputs[16], inputs[17], inputs[18]);
-        battleship_account::place_ship(inputs[19], inputs[20], inputs[21]);
-        battleship_account::place_ship(inputs[22], inputs[23], inputs[24]);
-        battleship_account::place_ship(inputs[25], inputs[26], inputs[27]);
-        battleship_account::place_ship(inputs[28], inputs[29], inputs[30]);
-        battleship_account::place_ship(inputs[31], inputs[32], inputs[33]);
-        battleship_account::place_ship(inputs[34], inputs[35], inputs[36]);
-        battleship_account::place_ship(inputs[37], inputs[38], inputs[39]);
-        battleship_account::place_ship(inputs[40], inputs[41], inputs[42]);
-        battleship_account::place_ship(inputs[43], inputs[44], inputs[45]);
-        battleship_account::place_ship(inputs[46], inputs[47], inputs[48]);
-        battleship_account::place_ship(inputs[49], inputs[50], inputs[51]);
-        battleship_account::place_ship(inputs[52], inputs[53], inputs[54]);
-        battleship_account::place_ship(inputs[55], inputs[56], inputs[57]);
-        battleship_account::place_ship(inputs[58], inputs[59], inputs[60]);
-
-        // Finalize setup
         let game_id = Word::from([inputs[0], inputs[1], inputs[2], inputs[3]]);
         let commitment = Word::from([inputs[6], inputs[7], inputs[8], inputs[9]]);
-        battleship_account::finalize_setup(game_id, inputs[4], inputs[5], commitment);
+
+        // rows_a = [row0..row3], rows_b = [row4..row7], rows_c = [row8, row9, 0, 0]
+        let rows_a = Word::from([inputs[10], inputs[11], inputs[12], inputs[13]]);
+        let rows_b = Word::from([inputs[14], inputs[15], inputs[16], inputs[17]]);
+        let rows_c = Word::from([inputs[18], inputs[19], felt!(0), felt!(0)]);
+
+        battleship_account::set_board_rows(rows_a, rows_b, rows_c);
+        battleship_account::finalize_board(game_id, inputs[4], inputs[5], commitment);
     }
 }
