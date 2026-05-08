@@ -19,7 +19,6 @@ import {
   NetworkId,
   StorageSlot,
   StorageSlotArray,
-  StorageMap,
   Felt,
   FeltArray,
 } from "@miden-sdk/miden-sdk";
@@ -50,7 +49,17 @@ export async function loadPackage(name: string): Promise<Package> {
   return pkg;
 }
 
-/** Build setup-note inputs: game_id(4) + opponent(2) + commitment(4) + ships(17×3) = 61 felts */
+/** Pack ship cells into 10 row values (3 bits per cell, col0 in bits 0-2, etc.) */
+function packBoard(shipCells: ShipCell[]): bigint[] {
+  const rows = new Array(10).fill(0n);
+  for (const cell of shipCells) {
+    const shift = BigInt(cell.col) * 3n;
+    rows[cell.row] |= BigInt(cell.shipId) << shift;
+  }
+  return rows;
+}
+
+/** Build setup-note inputs: game_id(4) + opponent(2) + commitment(4) + packed_rows(10) = 20 felts */
 export function buildSetupInputs(
   gameIdFelts: Felt[],
   oppPrefix: Felt,
@@ -63,10 +72,9 @@ export function buildSetupInputs(
   arr.push(oppPrefix);
   arr.push(oppSuffix);
   for (let i = 0; i < 4; i++) arr.push(commitment[i]);
-  for (const cell of shipCells) {
-    arr.push(new Felt(BigInt(cell.row)));
-    arr.push(new Felt(BigInt(cell.col)));
-    arr.push(new Felt(BigInt(cell.shipId)));
+  const packed = packBoard(shipCells);
+  for (const rowVal of packed) {
+    arr.push(new Felt(rowVal));
   }
   return arr;
 }
@@ -141,14 +149,14 @@ export async function createGameAccount(
 ): Promise<string> {
   const seed = crypto.getRandomValues(new Uint8Array(32));
 
-  // Initialize all 7 storage slots matching the contract's #[storage] fields (in order):
+  // Initialize all 16 storage slots matching the contract's #[storage] fields (in order):
   // 1. game_config: [grid_size, num_placed, phase, expected_turn]
   // 2. opponent: [prefix, suffix, ships_hit_count, total_shots_received]
   // 3. board_commitment: [h0, h1, h2, h3]
   // 4. opponent_commitment: [h0, h1, h2, h3]
   // 5. game_id: [gid0, gid1, gid2, gid3]
   // 6. reveal_status: [my_revealed, opponent_verified, 0, 0]
-  // 7. my_board: StorageMap for board cells and ship counts
+  // 7-16. board_row_0..board_row_9: packed board rows
   const slots = new StorageSlotArray([
     StorageSlot.emptyValue("miden_battleship_account::battleship_account::game_config"),
     StorageSlot.emptyValue("miden_battleship_account::battleship_account::opponent"),
@@ -156,7 +164,16 @@ export async function createGameAccount(
     StorageSlot.emptyValue("miden_battleship_account::battleship_account::opponent_commitment"),
     StorageSlot.emptyValue("miden_battleship_account::battleship_account::game_id"),
     StorageSlot.emptyValue("miden_battleship_account::battleship_account::reveal_status"),
-    StorageSlot.map("miden_battleship_account::battleship_account::my_board", new StorageMap()),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_0"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_1"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_2"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_3"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_4"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_5"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_6"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_7"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_8"),
+    StorageSlot.emptyValue("miden_battleship_account::battleship_account::board_row_9"),
   ]);
   const component = AccountComponent.fromPackage(battleshipPkg, slots).withSupportsAllTypes();
 

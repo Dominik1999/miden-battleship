@@ -14,7 +14,7 @@ import {
   FeltArray,
   Word,
 } from "@miden-sdk/miden-sdk";
-import { AUTO_SYNC_INTERVAL_MS, RESULT_SCRIPT_ROOT, SLOT_BOARD, SLOT_OPPONENT, TOTAL_SHIP_CELLS } from "@/config";
+import { AUTO_SYNC_INTERVAL_MS, RESULT_SCRIPT_ROOT, SLOT_BOARD_ROWS, SLOT_OPPONENT, TOTAL_SHIP_CELLS } from "@/config";
 
 const log = (msg: string, ...args: unknown[]) =>
   console.log(
@@ -150,11 +150,9 @@ export function useGameplaySync(
         if (!defenderAccount) {
           throw new Error("Cannot read defender account from local store");
         }
-        const boardKey = Word.newFromFelts([
-          new Felt(0n), new Felt(0n), new Felt(row), new Felt(col),
-        ]);
-        const cellValue = defenderAccount.storage().getMapItem(SLOT_BOARD, boardKey);
-        const cellState = cellValue ? Number(cellValue.toU64s()[3]) : 0;
+        const rowWord = defenderAccount.storage().getItem(SLOT_BOARD_ROWS[Number(row)]);
+        const packedRow = rowWord ? rowWord.toU64s()[0] : 0n;
+        const cellState = Number((packedRow >> (col * 3n)) & 0x7n);
         const isHit = cellState >= 1 && cellState <= 5;
         const result = isHit ? 1n : 0n;
 

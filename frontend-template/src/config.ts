@@ -7,8 +7,18 @@ export const SLOT_GAME_CONFIG =
   "miden_battleship_account::battleship_account::game_config";
 export const SLOT_OPPONENT =
   "miden_battleship_account::battleship_account::opponent";
-export const SLOT_BOARD =
-  "miden_battleship_account::battleship_account::my_board";
+export const SLOT_BOARD_ROWS = [
+  "miden_battleship_account::battleship_account::board_row_0",
+  "miden_battleship_account::battleship_account::board_row_1",
+  "miden_battleship_account::battleship_account::board_row_2",
+  "miden_battleship_account::battleship_account::board_row_3",
+  "miden_battleship_account::battleship_account::board_row_4",
+  "miden_battleship_account::battleship_account::board_row_5",
+  "miden_battleship_account::battleship_account::board_row_6",
+  "miden_battleship_account::battleship_account::board_row_7",
+  "miden_battleship_account::battleship_account::board_row_8",
+  "miden_battleship_account::battleship_account::board_row_9",
+] as const;
 export const SLOT_BOARD_COMMITMENT =
   "miden_battleship_account::battleship_account::board_commitment";
 export const SLOT_OPPONENT_COMMITMENT =
