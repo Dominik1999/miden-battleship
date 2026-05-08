@@ -27,6 +27,16 @@ const TOTAL_SHIP_CELLS: u64 = 17;
 
 const GRID_SIZE: u64 = 10;
 
+fn get_cell_from_packed(packed: u64, col: u64) -> u64 {
+    (packed >> (col * 3)) & 0x7
+}
+
+fn set_cell_in_packed(packed: u64, col: u64, value: u64) -> u64 {
+    let shift = col * 3;
+    let mask = !(0x7u64 << shift);
+    (packed & mask) | (value << shift)
+}
+
 #[component]
 struct BattleshipAccount {
     /// [grid_size, num_placed, phase, expected_turn]
@@ -53,53 +63,142 @@ struct BattleshipAccount {
     #[storage(description = "reveal status")]
     reveal_status: StorageValue<Word>,
 
-    /// Board cells: key=(0,0,row,col) -> cell state
-    /// Ship counts: key=(1,0,0,ship_id) -> count of placed cells
-    #[storage(description = "board cells and ship counts")]
-    my_board: StorageMap<Word, Felt>,
+    /// Board rows: each row packs 10 cells at 3 bits each into Felt[0]
+    #[storage(description = "board row 0")]
+    board_row_0: StorageValue<Word>,
+    #[storage(description = "board row 1")]
+    board_row_1: StorageValue<Word>,
+    #[storage(description = "board row 2")]
+    board_row_2: StorageValue<Word>,
+    #[storage(description = "board row 3")]
+    board_row_3: StorageValue<Word>,
+    #[storage(description = "board row 4")]
+    board_row_4: StorageValue<Word>,
+    #[storage(description = "board row 5")]
+    board_row_5: StorageValue<Word>,
+    #[storage(description = "board row 6")]
+    board_row_6: StorageValue<Word>,
+    #[storage(description = "board row 7")]
+    board_row_7: StorageValue<Word>,
+    #[storage(description = "board row 8")]
+    board_row_8: StorageValue<Word>,
+    #[storage(description = "board row 9")]
+    board_row_9: StorageValue<Word>,
 }
 
 #[component]
 impl BattleshipAccount {
-    /// Place a single ship cell on the board. Only valid during CREATED phase.
-    pub fn place_ship(&mut self, row: Felt, col: Felt, ship_id: Felt) {
+    fn get_board_row(&self, row: u64) -> Word {
+        match row {
+            0 => self.board_row_0.get(),
+            1 => self.board_row_1.get(),
+            2 => self.board_row_2.get(),
+            3 => self.board_row_3.get(),
+            4 => self.board_row_4.get(),
+            5 => self.board_row_5.get(),
+            6 => self.board_row_6.get(),
+            7 => self.board_row_7.get(),
+            8 => self.board_row_8.get(),
+            9 => self.board_row_9.get(),
+            _ => panic!("row out of bounds"),
+        }
+    }
+
+    fn set_board_row(&mut self, row: u64, value: Word) {
+        match row {
+            0 => self.board_row_0.set(value),
+            1 => self.board_row_1.set(value),
+            2 => self.board_row_2.set(value),
+            3 => self.board_row_3.set(value),
+            4 => self.board_row_4.set(value),
+            5 => self.board_row_5.set(value),
+            6 => self.board_row_6.set(value),
+            7 => self.board_row_7.set(value),
+            8 => self.board_row_8.set(value),
+            9 => self.board_row_9.set(value),
+            _ => panic!("row out of bounds"),
+        };
+    }
+
+    /// Store packed board rows. Must be called before finalize_board.
+    /// rows_a = [row0, row1, row2, row3]
+    /// rows_b = [row4, row5, row6, row7]
+    /// rows_c = [row8, row9, 0, 0]
+    pub fn set_board_rows(
+        &mut self,
+        rows_a: Word,
+        rows_b: Word,
+        rows_c: Word,
+    ) {
         let config: Word = self.game_config.get();
         assert!(config[2].as_canonical_u64() == PHASE_CREATED, "wrong phase");
 
-        let r = row.as_canonical_u64();
-        let c = col.as_canonical_u64();
-        assert!(r < GRID_SIZE, "row out of bounds");
-        assert!(c < GRID_SIZE, "col out of bounds");
+        let rows: [Felt; 10] = [
+            rows_a[0], rows_a[1], rows_a[2], rows_a[3],
+            rows_b[0], rows_b[1], rows_b[2], rows_b[3],
+            rows_c[0], rows_c[1],
+        ];
 
-        let sid = ship_id.as_canonical_u64();
-        assert!(sid >= 1 && sid <= 5, "invalid ship id");
+        // Count total cells and per-ship counts
+        let mut total: u64 = 0;
+        let mut ship1: u64 = 0;
+        let mut ship2: u64 = 0;
+        let mut ship3: u64 = 0;
+        let mut ship4: u64 = 0;
+        let mut ship5: u64 = 0;
 
-        // Check cell is empty
-        let key = Word::from([felt!(0), felt!(0), row, col]);
-        let current: Felt = self.my_board.get(key);
-        assert!(current.as_canonical_u64() == CELL_WATER, "cell occupied");
+        let mut r: u64 = 0;
+        while r < GRID_SIZE {
+            let packed = rows[r as usize].as_canonical_u64();
+            let mut c: u64 = 0;
+            while c < GRID_SIZE {
+                let cell = get_cell_from_packed(packed, c);
+                if cell >= 1 && cell <= 5 {
+                    total += 1;
+                    match cell {
+                        1 => ship1 += 1,
+                        2 => ship2 += 1,
+                        3 => ship3 += 1,
+                        4 => ship4 += 1,
+                        5 => ship5 += 1,
+                        _ => {}
+                    }
+                } else {
+                    assert!(cell == CELL_WATER, "invalid cell value");
+                }
+                c += 1;
+            }
+            r += 1;
+        }
 
-        // Store the ship cell
-        self.my_board.set(key, ship_id);
+        // Validate ship counts
+        assert!(total == TOTAL_SHIP_CELLS, "wrong number of ships");
+        assert!(ship1 == SHIP_1_SIZE, "ship 1 wrong size");
+        assert!(ship2 == SHIP_2_SIZE, "ship 2 wrong size");
+        assert!(ship3 == SHIP_3_SIZE, "ship 3 wrong size");
+        assert!(ship4 == SHIP_4_SIZE, "ship 4 wrong size");
+        assert!(ship5 == SHIP_5_SIZE, "ship 5 wrong size");
 
-        // Increment per-ship count
-        let count_key = Word::from([felt!(1), felt!(0), felt!(0), ship_id]);
-        let count: Felt = self.my_board.get(count_key);
-        self.my_board.set(count_key, count + felt!(1));
+        // Write board rows to storage
+        let mut r2: u64 = 0;
+        while r2 < GRID_SIZE {
+            self.set_board_row(r2, Word::from([rows[r2 as usize], felt!(0), felt!(0), felt!(0)]));
+            r2 += 1;
+        }
 
-        // Increment total placed count
-        let num_placed = config[1].as_canonical_u64() + 1;
+        // Mark rows as placed (num_placed = TOTAL_SHIP_CELLS) but stay in CREATED phase.
+        // finalize_board must be called next to transition to CHALLENGED.
         self.game_config.set(Word::from([
-            config[0],
-            Felt::new(num_placed),
-            config[2],
-            config[3],
+            Felt::new(GRID_SIZE),
+            Felt::new(TOTAL_SHIP_CELLS),
+            Felt::new(PHASE_CREATED),
+            felt!(0),
         ]));
     }
 
-    /// Finalize board setup: validate ship counts, store commitment, set phase.
-    /// The commitment is pre-computed by the caller (note script or client).
-    pub fn finalize_setup(
+    /// Finalize board setup: store game metadata and transition to CHALLENGED phase.
+    /// Must be called after set_board_rows.
+    pub fn finalize_board(
         &mut self,
         game_id: Word,
         opponent_prefix: Felt,
@@ -109,37 +208,11 @@ impl BattleshipAccount {
         let config: Word = self.game_config.get();
         assert!(config[2].as_canonical_u64() == PHASE_CREATED, "wrong phase");
 
-        // Validate total placed count
+        // Validate that board rows were placed
         assert!(
             config[1].as_canonical_u64() == TOTAL_SHIP_CELLS,
-            "wrong number of ships"
+            "board rows not set"
         );
-
-        // Validate per-ship counts
-        let s1: Felt = self
-            .my_board
-            .get(Word::from([felt!(1), felt!(0), felt!(0), felt!(1)]));
-        assert!(s1.as_canonical_u64() == SHIP_1_SIZE, "ship 1 wrong size");
-
-        let s2: Felt = self
-            .my_board
-            .get(Word::from([felt!(1), felt!(0), felt!(0), felt!(2)]));
-        assert!(s2.as_canonical_u64() == SHIP_2_SIZE, "ship 2 wrong size");
-
-        let s3: Felt = self
-            .my_board
-            .get(Word::from([felt!(1), felt!(0), felt!(0), felt!(3)]));
-        assert!(s3.as_canonical_u64() == SHIP_3_SIZE, "ship 3 wrong size");
-
-        let s4: Felt = self
-            .my_board
-            .get(Word::from([felt!(1), felt!(0), felt!(0), felt!(4)]));
-        assert!(s4.as_canonical_u64() == SHIP_4_SIZE, "ship 4 wrong size");
-
-        let s5: Felt = self
-            .my_board
-            .get(Word::from([felt!(1), felt!(0), felt!(0), felt!(5)]));
-        assert!(s5.as_canonical_u64() == SHIP_5_SIZE, "ship 5 wrong size");
 
         // Store game_id
         self.game_id.set(game_id);
@@ -166,8 +239,14 @@ impl BattleshipAccount {
 
     /// Get a cell's state
     pub fn get_cell(&self, row: Felt, col: Felt) -> Felt {
-        let key = Word::from([felt!(0), felt!(0), row, col]);
-        self.my_board.get(key)
+        let r = row.as_canonical_u64();
+        let c = col.as_canonical_u64();
+        assert!(r < GRID_SIZE, "row out of bounds");
+        assert!(c < GRID_SIZE, "col out of bounds");
+
+        let row_word: Word = self.get_board_row(r);
+        let packed = row_word[0].as_canonical_u64();
+        Felt::new(get_cell_from_packed(packed, c))
     }
 
     /// Get current game phase
@@ -272,13 +351,15 @@ impl BattleshipAccount {
         assert!(turn.as_canonical_u64() == config[3].as_canonical_u64(), "wrong turn number");
 
         // Check bounds
-        assert!(row.as_canonical_u64() < GRID_SIZE, "row out of bounds");
-        assert!(col.as_canonical_u64() < GRID_SIZE, "col out of bounds");
+        let r = row.as_canonical_u64();
+        let c = col.as_canonical_u64();
+        assert!(r < GRID_SIZE, "row out of bounds");
+        assert!(c < GRID_SIZE, "col out of bounds");
 
-        // Read cell
-        let key = Word::from([felt!(0), felt!(0), row, col]);
-        let cell: Felt = self.my_board.get(key);
-        let cell_val = cell.as_canonical_u64();
+        // Read cell from packed row
+        let row_word: Word = self.get_board_row(r);
+        let packed = row_word[0].as_canonical_u64();
+        let cell_val = get_cell_from_packed(packed, c);
 
         // Check not already shot (valid cells are 0-5; hit=6, miss=7)
         assert!(cell_val <= 5, "cell already shot");
@@ -298,8 +379,9 @@ impl BattleshipAccount {
             ships_hit_count
         };
 
-        // Update cell
-        self.my_board.set(key, Felt::new(new_cell));
+        // Update cell in packed row
+        let new_packed = set_cell_in_packed(packed, c, new_cell);
+        self.set_board_row(r, Word::from([Felt::new(new_packed), felt!(0), felt!(0), felt!(0)]));
 
         // Update opponent info (counters)
         self.opponent.set(Word::from([
