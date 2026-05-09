@@ -121,13 +121,16 @@ export function useFireShot(
         log("Shot submitted successfully");
         setIsSubmitting(false);
 
-        // Wait for network to process the shot, then re-sync
+        // Wait for network to process the shot, then re-sync.
+        // Keep isWaiting=true until sync completes so useGameplaySync
+        // stays disabled and doesn't race with this sync call.
         setIsWaiting(true);
         log(`Waiting ${NETWORK_SYNC_DELAY_MS / 1000}s for network...`);
         await new Promise((r) => setTimeout(r, NETWORK_SYNC_DELAY_MS));
         await sync();
-        refetchState();
         setIsWaiting(false);
+        // Defer refetchState to avoid overlapping with any pending WASM futures
+        setTimeout(() => refetchState(), 0);
         log("Shot flow complete");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);

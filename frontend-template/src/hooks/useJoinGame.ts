@@ -81,6 +81,10 @@ export function useJoinGame() {
   // Track note IDs we've already consumed (isConsumed() can lag behind)
   const consumedNoteIds = useRef<Set<string>>(new Set());
 
+  // Track our own setup note ID so we can consume it first (before the accept note).
+  // The contract requires CREATED → CHALLENGED (setup) before CHALLENGED → ACTIVE (accept).
+  const setupNoteIdRef = useRef<string | null>(null);
+
   /**
    * Join a game by entering the starter's game account address.
    * Creates own game account, submits setup + challenge notes.
@@ -142,9 +146,10 @@ export function useJoinGame() {
         const commitFelts = commitment.toFelts();
 
         // Submit setup note (opponent = starter) — wallet is sender (has proper auth)
+        // Save the note ID so consumeNotes() can consume it first (before accept note)
         setStage("setting-up");
         log("Submitting setup note (tag=2) → joiner game account...");
-        await submitNote(
+        const setupNoteId = await submitNote(
           setupPkg,
           buildSetupInputs(
             gameIdFelts,
@@ -160,6 +165,9 @@ export function useJoinGame() {
           walletId,
           requestTransaction as (tx: unknown) => Promise<unknown>,
         );
+
+        setupNoteIdRef.current = setupNoteId;
+        log(`Setup note ID saved: ${setupNoteId}`);
 
         // Submit challenge note (targeting starter) — wallet is sender
         setStage("challenging");
@@ -279,6 +287,17 @@ export function useJoinGame() {
     log(`=== CONSUMING ${noteIds.length} NOTE(S) SEQUENTIALLY ===`);
     noteIds.forEach((id, i) => log(`  [${i}] ${id}`));
     log(`Against game account: ${gameAccountAddress}`);
+
+    // Sort: setup note must be consumed first (CREATED → CHALLENGED)
+    // before the accept note (CHALLENGED → ACTIVE). Without this ordering,
+    // the accept note may be consumed first and hit an assertion failure.
+    const setupId = setupNoteIdRef.current;
+    if (setupId && noteIds.includes(setupId)) {
+      const idx = noteIds.indexOf(setupId);
+      noteIds.splice(idx, 1);
+      noteIds.unshift(setupId);
+      log(`Reordered: setup note ${setupId} moved to front`);
+    }
 
     for (const noteId of noteIds) {
       let consumed = false;

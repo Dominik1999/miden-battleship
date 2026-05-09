@@ -230,8 +230,13 @@ export function useGameplaySync(
     busyRef.current = true;
     try {
       await sync();
-      refetchNotes();
 
+      // IMPORTANT: Do NOT call refetchNotes() here. It triggers a background
+      // WASM client query (fire-and-forget) that races with subsequent WASM
+      // calls (buildShotNoteRequest, consume, execute), causing
+      // wasm_bindgen::borrow_fail. Instead, read notes from notesRef which
+      // holds the previous render's data. New notes from this sync will be
+      // picked up on the next tick after React re-renders.
       const notes = notesRef.current ?? [];
       const pending = notes.filter(
         (n) =>
@@ -292,16 +297,19 @@ export function useGameplaySync(
             log(`Shot-note consume failed for ${shotId}: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
-
-        // SDK hooks already sync internally after each tx — just refetch notes
-        refetchNotes();
       }
-
-      refetchState();
     } catch (err) {
       log(`Sync error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       busyRef.current = false;
+      // Trigger React state refresh AFTER all WASM operations are done and
+      // the busy guard is released. Using setTimeout(0) ensures these
+      // fire-and-forget calls don't overlap with any pending WASM futures
+      // from the consume/execute calls above.
+      setTimeout(() => {
+        refetchNotes();
+        refetchState();
+      }, 0);
     }
   };
 
