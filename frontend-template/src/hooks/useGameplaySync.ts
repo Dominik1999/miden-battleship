@@ -170,11 +170,11 @@ export function useGameplaySync(
         // Sync directly (no SDK sync() which triggers useAccount re-fetches)
         await client.syncState();
 
-        // Read notes from client inside the lock
-        const allClientNotes = await client.getInputNotes(new NoteFilter(NoteFilterTypes.All));
-        const pending = allClientNotes.filter(
+        // Read only committed (unconsumed) notes from client inside the lock.
+        // Using Committed instead of All avoids re-processing consumed handshake notes.
+        const committedNotes = await client.getInputNotes(new NoteFilter(NoteFilterTypes.Committed));
+        const pending = committedNotes.filter(
           (n: { id: () => { toString: () => string }; isConsumed: () => boolean; isProcessing: () => boolean; isAuthenticated: () => boolean }) =>
-            !n.isConsumed() &&
             !n.isProcessing() &&
             n.isAuthenticated() &&
             !handledNoteIds.has(n.id().toString()) &&
