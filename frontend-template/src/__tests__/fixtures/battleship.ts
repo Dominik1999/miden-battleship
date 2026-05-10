@@ -39,21 +39,25 @@ export function createMockGameStorage(opts: {
     "miden_battleship_account::battleship_account::opponent": opponent,
   };
 
-  // Build board cells for StorageMap
-  const boardMap = new Map<string, ReturnType<typeof mockWord>>();
+  // Pack board cells into per-row words matching how useBoardState reads them.
+  // Each row packs cell values as 3-bit fields: packed |= (cellState << (col * 3))
   if (opts.boardCells) {
+    const rowPacked = new Map<number, bigint>();
     for (const [key, value] of opts.boardCells) {
-      boardMap.set(key, mockWord([0n, 0n, 0n, BigInt(value)]));
+      const [rowStr, colStr] = key.split(",");
+      const row = parseInt(rowStr);
+      const col = parseInt(colStr);
+      const current = rowPacked.get(row) ?? 0n;
+      rowPacked.set(row, current | (BigInt(value) << (BigInt(col) * 3n)));
+    }
+    for (const [row, packed] of rowPacked) {
+      const slotName = `miden_battleship_account::battleship_account::board_row_${row}`;
+      slotMap[slotName] = mockWord([packed, 0n, 0n, 0n]);
     }
   }
 
   return {
     getItem: vi.fn((slotName: string) => slotMap[slotName] ?? null),
-    getMapItem: vi.fn((_slotName: string, key: { toU64s: () => bigint[] }) => {
-      const k = key.toU64s();
-      const mapKey = `${k[2]},${k[3]}`;
-      return boardMap.get(mapKey) ?? null;
-    }),
   };
 }
 

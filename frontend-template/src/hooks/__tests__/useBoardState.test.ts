@@ -73,29 +73,27 @@ describe("useBoardState", () => {
     expect(result.current.board![5][5].state).toBe(0); // Water (empty)
   });
 
-  it("hides ship positions in opponent mode", () => {
-    const boardCells = new Map<string, number>();
-    boardCells.set("0,0", 1); // Ship — should be hidden
-    boardCells.set("0,1", 6); // Hit — should show
-    boardCells.set("0,2", 7); // Miss — should show
-
-    const mockAccount = createMockGameAccount({
-      id: "mtst1test",
-      boardCells,
-    });
-
+  it("returns all-water grid in opponent mode (no WASM query)", () => {
+    // In opponent mode, useAccount receives undefined to prevent background
+    // WASM queries that race with gameplay sync. The board is always all-water
+    // since we can't read the opponent's storage.
     vi.mocked(useAccount).mockReturnValue({
-      account: mockAccount as AnyAccount,
+      account: null,
       assets: [],
       isLoading: false,
       error: null,
       refetch: vi.fn(),
       getBalance: vi.fn(() => 0n),
     });
-
     const { result } = renderHook(() => useBoardState("mtst1test", true));
-    expect(result.current.board![0][0].state).toBe(0); // Ship hidden → water
-    expect(result.current.board![0][1].state).toBe(6); // Hit shows
-    expect(result.current.board![0][2].state).toBe(7); // Miss shows
+    expect(result.current.board).not.toBeNull();
+    expect(result.current.board!.length).toBe(10);
+    expect(result.current.board![0].length).toBe(10);
+    // All cells should be water
+    for (let r = 0; r < 10; r++) {
+      for (let c = 0; c < 10; c++) {
+        expect(result.current.board![r][c].state).toBe(0);
+      }
+    }
   });
 });
