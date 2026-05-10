@@ -1,5 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
-import { useMidenClient, useMiden, useNotes, useSyncState, useConsume, useTransaction } from "@miden-sdk/react";
+import { useMidenClient, useMiden, useNotes, useConsume, useTransaction } from "@miden-sdk/react";
 import {
   TransactionRequestBuilder,
   NoteAndArgs,
@@ -41,7 +41,10 @@ export function useGameplaySync(
   enabled: boolean,
   _refetchState: () => void,
 ) {
-  const { sync } = useSyncState();
+  // NOTE: We intentionally don't use useSyncState().sync() here. The SDK's
+  // sync() updates lastSyncTime, which triggers ALL useAccount hooks to fire
+  // background client.getAccount() calls that race with our consume/execute.
+  // Instead we call client.syncState() directly via runExclusive.
   const client = useMidenClient();
   const { runExclusive } = useMiden();
   const { notes: allNotes } = useNotes(
@@ -229,14 +232,12 @@ export function useGameplaySync(
     if (busyRef.current) return;
     busyRef.current = true;
     try {
-      await sync();
+      // Use runExclusive for sync to prevent the SDK's sync() from updating
+      // lastSyncTime, which triggers ALL useAccount hooks to fire background
+      // client.getAccount() calls that race with our consume/execute below.
+      // By calling client.syncState() directly, we sync without side effects.
+      await runExclusive(() => client.syncState());
 
-      // IMPORTANT: Do NOT call refetchNotes() here. It triggers a background
-      // WASM client query (fire-and-forget) that races with subsequent WASM
-      // calls (buildShotNoteRequest, consume, execute), causing
-      // wasm_bindgen::borrow_fail. Instead, read notes from notesRef which
-      // holds the previous render's data. New notes from this sync will be
-      // picked up on the next tick after React re-renders.
       const notes = notesRef.current ?? [];
       const pending = notes.filter(
         (n) =>
