@@ -39,12 +39,12 @@ let preGameNoteIds: Set<string> | null = null;
 export function useGameplaySync(
   myAccountId: string,
   enabled: boolean,
-  refetchState: () => void,
+  _refetchState: () => void,
 ) {
   const { sync } = useSyncState();
   const client = useMidenClient();
   const { runExclusive } = useMiden();
-  const { notes: allNotes, refetch: refetchNotes } = useNotes(
+  const { notes: allNotes } = useNotes(
     myAccountId ? { accountId: myAccountId } : undefined,
   );
   const { consume } = useConsume();
@@ -302,14 +302,10 @@ export function useGameplaySync(
       log(`Sync error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       busyRef.current = false;
-      // Trigger React state refresh AFTER all WASM operations are done and
-      // the busy guard is released. Using setTimeout(0) ensures these
-      // fire-and-forget calls don't overlap with any pending WASM futures
-      // from the consume/execute calls above.
-      setTimeout(() => {
-        refetchNotes();
-        refetchState();
-      }, 0);
+      // Do NOT call refetchNotes() or refetchState() here — they trigger
+      // background WASM queries that race with the next tick's sync() call,
+      // causing wasm_bindgen::borrow_fail. React will re-render with fresh
+      // data from the SDK's internal state updates after sync/consume complete.
     }
   };
 

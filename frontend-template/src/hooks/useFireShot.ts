@@ -129,8 +129,9 @@ export function useFireShot(
         await new Promise((r) => setTimeout(r, NETWORK_SYNC_DELAY_MS));
         await sync();
         setIsWaiting(false);
-        // Defer refetchState to avoid overlapping with any pending WASM futures
-        setTimeout(() => refetchState(), 0);
+        // Do NOT call refetchState() here — it triggers a background WASM query
+        // that races with useGameplaySync's next tick. React will re-render with
+        // fresh data from the SDK's internal state updates after sync completes.
         log("Shot flow complete");
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
