@@ -1,5 +1,5 @@
-import { useEffect, useRef, useCallback } from "react";
-import { useMidenClient, useMiden, useNotes, useSyncState, useConsume, useTransaction } from "@miden-sdk/react";
+import { useEffect, useRef, useCallback, useState } from "react";
+import { useMidenClient, useMiden, useNotes } from "@miden-sdk/react";
 import {
   TransactionRequestBuilder,
   NoteAndArgs,
@@ -8,13 +8,16 @@ import {
   NoteRecipientArray,
   NoteScript,
   NoteStorage,
+  NoteFilter,
+  NoteFilterTypes,
   Package,
   AccountId,
   Felt,
   FeltArray,
   Word,
 } from "@miden-sdk/miden-sdk";
-import { AUTO_SYNC_INTERVAL_MS, RESULT_SCRIPT_ROOT, SLOT_BOARD_ROWS, SLOT_OPPONENT, TOTAL_SHIP_CELLS } from "@/config";
+import { AUTO_SYNC_INTERVAL_MS, SLOT_BOARD_ROWS, SLOT_GAME_CONFIG, SLOT_OPPONENT, GRID_SIZE, TOTAL_SHIP_CELLS } from "@/config";
+import type { GameState, GamePhase, Board, BoardCell, CellState } from "@/types/game";
 
 const log = (msg: string, ...args: unknown[]) =>
   console.log(
@@ -32,35 +35,28 @@ let preGameNoteIds: Set<string> | null = null;
  * Syncs from the network and auto-consumes incoming notes (opponent shots
  * and result notes) on the player's own game account during gameplay.
  *
- * Shot-notes (14 inputs) create output result-notes, so we use useTransaction
- * with withExpectedOutputRecipients(). Result-notes (4 inputs) are simple
- * consumes with no output notes, so we use useConsume.
+ * IMPORTANT: All WASM client access is serialized through a single
+ * runExclusive() call per tick to prevent borrow_fail races with
+ * background SDK hook queries (useAccount re-fetching on lastSyncTime).
  */
 export function useGameplaySync(
   myAccountId: string,
   enabled: boolean,
-  refetchState: () => void,
 ) {
-  const { sync } = useSyncState();
   const client = useMidenClient();
   const { runExclusive } = useMiden();
-  const { notes: allNotes, refetch: refetchNotes } = useNotes(
+  const { notes: allNotes } = useNotes(
     myAccountId ? { accountId: myAccountId } : undefined,
   );
-  const { consume } = useConsume();
-  const { execute } = useTransaction();
+
+  const [gameState, setGameState] = useState<GameState | null>(null);
+  const [myBoard, setMyBoard] = useState<Board | null>(null);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const busyRef = useRef(false);
-  // Stable ref for tick so the polling useEffect never restarts due to
-  // tick's callback identity changing (which cascades from sync/consume/execute).
   const tickRef = useRef<() => Promise<void>>(async () => {});
-  // Keep latest notes in a ref so the interval closure sees fresh data
   const notesRef = useRef(allNotes);
   notesRef.current = allNotes;
-  // Cached raw bytes of result_note.masp (NOT the WASM object — WASM objects
-  // can be consumed/freed when passed to constructors, so we cache bytes and
-  // create fresh NoteScript instances each time)
   const resultMaspBytesRef = useRef<Uint8Array | null>(null);
 
   // Snapshot pre-game notes on first render with data
@@ -80,226 +76,194 @@ export function useGameplaySync(
     }
     const pkg = Package.deserialize(resultMaspBytesRef.current);
     const script = NoteScript.fromPackage(pkg);
-    const root = script.root();
-    const rootFelts = root.toFelts();
-    const loadedRoot = [rootFelts[0].asInt(), rootFelts[1].asInt(), rootFelts[2].asInt(), rootFelts[3].asInt()];
-    const match = loadedRoot.every((v, i) => v === RESULT_SCRIPT_ROOT[i]);
-    if (!match) {
-      log("WARNING: Script root mismatch! The kernel will fail to find the script.");
-    }
     return script;
   }, []);
 
   /**
-   * One tick: sync via raw WASM client, find unconsumed notes, consume them.
-   * Everything goes through wasmClient directly — no wallet adapter popups.
+   * Classify a note and build a TX request if it's a shot-note.
+   * MUST be called from within a runExclusive block (no internal locking).
+   * Returns: TransactionRequest (shot), null (result-note), or "skip".
    */
-  const buildShotNoteRequest = useCallback(
+  const classifyAndBuildRequest = useCallback(
     async (noteIdStr: string) => {
       const accountIdObj = AccountId.fromBech32(myAccountId);
       const resultScript = await loadResultScript();
 
-      // Use runExclusive to safely read account storage from the WASM client
-      return await runExclusive(async () => {
-        const noteRecord = await client.getInputNote(noteIdStr);
-        if (!noteRecord) {
-          throw new Error(`Note ${noteIdStr} not found in local store`);
-        }
-
-        const note = noteRecord.toNote();
-        log(`Note metadata: tag=${note.metadata().tag().asU32()}, type=${note.metadata().noteType()}`);
-        const noteInputs = note.recipient().storage().items();
-        log(`Note has ${noteInputs.length} inputs`);
-
-        if (noteInputs.length === 4) {
-          // Result-note — return null to signal useConsume path
-          const turn = noteInputs[2].asInt();
-          const encodedResult = noteInputs[3].asInt();
-          const shotResult = encodedResult / 2n;
-          const gameOver = encodedResult % 2n;
-          log(`Result note: turn=${turn}, result=${shotResult === 1n ? "HIT" : "MISS"}, gameOver=${gameOver}`);
-          return null;
-        }
-
-        if (noteInputs.length !== 14) {
-          log(`Skipping note ${noteIdStr} — unknown type (${noteInputs.length} inputs)`);
-          return "skip" as const;
-        }
-
-        // --- SHOT-NOTE (14 inputs): build TX request with expected output recipient ---
-        const noteScriptRoot = [noteInputs[7].asInt(), noteInputs[8].asInt(), noteInputs[9].asInt(), noteInputs[10].asInt()];
-        log(`Shot note's result_script_root (inputs[7..10]): [${noteScriptRoot.join(", ")}]`);
-        log(`Config RESULT_SCRIPT_ROOT: [${RESULT_SCRIPT_ROOT.join(", ")}]`);
-        const inputsMatch = noteScriptRoot.every((v, i) => v === RESULT_SCRIPT_ROOT[i]);
-        log(`Shot inputs match config: ${inputsMatch}`);
-
-        const row = noteInputs[0].asInt();
-        const col = noteInputs[1].asInt();
-        const turn = noteInputs[2];
-        const serialNum = Word.newFromFelts([noteInputs[3], noteInputs[4], noteInputs[5], noteInputs[6]]);
-        const shooterPrefix = noteInputs[11];
-        const shooterSuffix = noteInputs[12];
-
-        // Read the defender's own board cell at (row, col) to predict hit/miss
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const wasmClient = (client as any).wasmWebClient;
-        if (!wasmClient) {
-          throw new Error("Cannot access raw WASM WebClient for storage read");
-        }
-        const defenderAccount = await wasmClient.getAccount(accountIdObj);
-        if (!defenderAccount) {
-          throw new Error("Cannot read defender account from local store");
-        }
-        const rowWord = defenderAccount.storage().getItem(SLOT_BOARD_ROWS[Number(row)]);
-        const packedRow = rowWord ? rowWord.toU64s()[0] : 0n;
-        const cellState = Number((packedRow >> (col * 3n)) & 0x7n);
-        const isHit = cellState >= 1 && cellState <= 5;
-        const result = isHit ? 1n : 0n;
-
-        // Read current shipsHitCount to determine game_over
-        const opponentSlot = defenderAccount.storage().getItem(SLOT_OPPONENT);
-        const shipsHitCount = opponentSlot ? Number(opponentSlot.toU64s()[2]) : 0;
-        const newHitCount = isHit ? shipsHitCount + 1 : shipsHitCount;
-        const gameOver = newHitCount >= TOTAL_SHIP_CELLS ? 1n : 0n;
-
-        const encodedResult = new Felt(result * 2n + gameOver);
-        log(`Predicted shot result: cell=${cellState}, hit=${isHit}, shipsHit=${shipsHitCount}→${newHitCount}, gameOver=${gameOver}, encoded=${result * 2n + gameOver}`);
-
-        const resultNoteInputs = new FeltArray();
-        resultNoteInputs.push(shooterPrefix);
-        resultNoteInputs.push(shooterSuffix);
-        resultNoteInputs.push(turn);
-        resultNoteInputs.push(encodedResult);
-
-        const correctRecipient = new NoteRecipient(
-          serialNum,
-          resultScript,
-          new NoteStorage(resultNoteInputs),
-        );
-        const recipientArray = new NoteRecipientArray([correctRecipient]);
-
-        const noteAndArgs = new NoteAndArgs(note);
-        const noteAndArgsArray = new NoteAndArgsArray([noteAndArgs]);
-
-        return new TransactionRequestBuilder()
-          .withInputNotes(noteAndArgsArray)
-          .withExpectedOutputRecipients(recipientArray)
-          .build();
-      });
-    },
-    [myAccountId, client, runExclusive, loadResultScript],
-  );
-
-  /**
-   * Consume a single note. Shot-notes go through useTransaction (custom TX
-   * with expected output recipients). Result-notes go through useConsume.
-   * Both paths use the wallet adapter's proper signing flow.
-   */
-  const consumeNote = useCallback(
-    async (noteIdStr: string) => {
-      const txRequest = await buildShotNoteRequest(noteIdStr);
-
-      if (txRequest === "skip") {
-        return; // unknown note type, skip silently
+      const noteRecord = await client.getInputNote(noteIdStr);
+      if (!noteRecord) {
+        throw new Error(`Note ${noteIdStr} not found in local store`);
       }
 
-      if (txRequest === null) {
-        // Result-note: simple consume via SDK hook
-        log(`Consuming result-note ${noteIdStr} via useConsume...`);
-        await consume({ accountId: myAccountId, notes: [noteIdStr] });
-        log(`Result-note ${noteIdStr} consumed`);
-        return;
+      const note = noteRecord.toNote();
+      const noteInputs = note.recipient().storage().items();
+      log(`Note ${noteIdStr}: ${noteInputs.length} inputs`);
+
+      if (noteInputs.length === 4) {
+        // Result-note
+        const encodedResult = noteInputs[3].asInt();
+        log(`Result note: result=${encodedResult / 2n === 1n ? "HIT" : "MISS"}, gameOver=${encodedResult % 2n}`);
+        return null;
       }
 
-      // Shot-note: custom TX with expected output recipients via SDK hook
-      log(`Consuming shot-note ${noteIdStr} via useTransaction...`);
-      await execute({
-        accountId: myAccountId,
-        request: () => txRequest,
-        skipSync: true, // we already synced in the tick
-      });
-      log(`Shot-note ${noteIdStr} consumed, result-note created`);
+      if (noteInputs.length !== 14) {
+        log(`Skipping note ${noteIdStr} — unknown type (${noteInputs.length} inputs)`);
+        return "skip" as const;
+      }
+
+      // Shot-note: build TX request with expected output recipient
+      const row = noteInputs[0].asInt();
+      const col = noteInputs[1].asInt();
+      const turn = noteInputs[2];
+      const serialNum = Word.newFromFelts([noteInputs[3], noteInputs[4], noteInputs[5], noteInputs[6]]);
+      const shooterPrefix = noteInputs[11];
+      const shooterSuffix = noteInputs[12];
+
+      // Read the defender's own board cell to predict hit/miss
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const wasmClient = (client as any).wasmWebClient;
+      if (!wasmClient) {
+        throw new Error("Cannot access raw WASM WebClient for storage read");
+      }
+      const defenderAccount = await wasmClient.getAccount(accountIdObj);
+      if (!defenderAccount) {
+        throw new Error("Cannot read defender account from local store");
+      }
+      const rowWord = defenderAccount.storage().getItem(SLOT_BOARD_ROWS[Number(row)]);
+      const packedRow = rowWord ? rowWord.toU64s()[0] : 0n;
+      const cellState = Number((packedRow >> (col * 3n)) & 0x7n);
+      const isHit = cellState >= 1 && cellState <= 5;
+      const result = isHit ? 1n : 0n;
+
+      const opponentSlot = defenderAccount.storage().getItem(SLOT_OPPONENT);
+      const shipsHitCount = opponentSlot ? Number(opponentSlot.toU64s()[2]) : 0;
+      const newHitCount = isHit ? shipsHitCount + 1 : shipsHitCount;
+      const gameOver = newHitCount >= TOTAL_SHIP_CELLS ? 1n : 0n;
+
+      const encodedResult = new Felt(result * 2n + gameOver);
+      log(`Shot at (${row},${col}): cell=${cellState}, hit=${isHit}, gameOver=${gameOver}`);
+
+      const resultNoteInputs = new FeltArray();
+      resultNoteInputs.push(shooterPrefix);
+      resultNoteInputs.push(shooterSuffix);
+      resultNoteInputs.push(turn);
+      resultNoteInputs.push(encodedResult);
+
+      const correctRecipient = new NoteRecipient(
+        serialNum,
+        resultScript,
+        new NoteStorage(resultNoteInputs),
+      );
+
+      const noteAndArgs = new NoteAndArgs(note);
+
+      return new TransactionRequestBuilder()
+        .withInputNotes(new NoteAndArgsArray([noteAndArgs]))
+        .withExpectedOutputRecipients(new NoteRecipientArray([correctRecipient]))
+        .build();
     },
-    [myAccountId, buildShotNoteRequest, consume, execute],
+    [myAccountId, client, loadResultScript],
   );
 
-  // Keep tickRef pointing at the latest tick closure on every render.
-  // This avoids wrapping in useCallback (whose identity changes cascade).
+  // The tick: sync + classify + consume, ALL within a single runExclusive.
   tickRef.current = async () => {
     if (busyRef.current) return;
     busyRef.current = true;
     try {
-      await sync();
-      refetchNotes();
+      await runExclusive(async () => {
+        // Sync directly (no SDK sync() which triggers useAccount re-fetches)
+        await client.syncState();
 
-      const notes = notesRef.current ?? [];
-      const pending = notes.filter(
-        (n) =>
-          !n.isConsumed() &&
-          !n.isProcessing() &&
-          n.isAuthenticated() &&
-          !handledNoteIds.has(n.id().toString()) &&
-          !(preGameNoteIds?.has(n.id().toString()) ?? false),
-      );
+        // Read only committed (unconsumed) notes from client inside the lock.
+        // Using Committed instead of All avoids re-processing consumed handshake notes.
+        const committedNotes = await client.getInputNotes(new NoteFilter(NoteFilterTypes.Committed));
+        const pending = committedNotes.filter(
+          (n: { id: () => { toString: () => string }; isConsumed: () => boolean; isProcessing: () => boolean; isAuthenticated: () => boolean }) =>
+            !n.isProcessing() &&
+            n.isAuthenticated() &&
+            !handledNoteIds.has(n.id().toString()) &&
+            !(preGameNoteIds?.has(n.id().toString()) ?? false),
+        );
 
-      if (pending.length > 0) {
-        log(`Found ${pending.length} pending note(s) to process`);
+        if (pending.length > 0) {
+          log(`Found ${pending.length} pending note(s)`);
 
-        // Classify notes into shot-notes and result-notes
-        const resultNoteIds: string[] = [];
-        const shotNotes: { id: string }[] = [];
+          // Process ONE note per tick to keep proving time bounded
+          const noteId = pending[0].id().toString();
 
-        for (const note of pending) {
-          const noteId = note.id().toString();
           try {
-            const txRequest = await buildShotNoteRequest(noteId);
+            const txRequest = await classifyAndBuildRequest(noteId);
             if (txRequest === "skip") {
               handledNoteIds.add(noteId);
-            } else if (txRequest === null) {
-              resultNoteIds.push(noteId);
             } else {
-              shotNotes.push({ id: noteId });
+              const accountIdObj = AccountId.fromBech32(myAccountId);
+
+              if (txRequest === null) {
+                // Result-note: simple consume via raw client
+                log(`Consuming result-note ${noteId}...`);
+                const noteRecord = await client.getInputNote(noteId);
+                if (!noteRecord) throw new Error(`Note ${noteId} not found`);
+                const consumeRequest = client.newConsumeTransactionRequest([noteRecord.toNote()]);
+                await client.submitNewTransaction(accountIdObj, consumeRequest);
+                handledNoteIds.add(noteId);
+                log(`Result-note ${noteId} consumed`);
+              } else {
+                // Shot-note: custom TX via raw client
+                log(`Consuming shot-note ${noteId}...`);
+                await client.submitNewTransaction(accountIdObj, txRequest);
+                handledNoteIds.add(noteId);
+                log(`Shot-note ${noteId} consumed`);
+              }
             }
           } catch (err) {
             handledNoteIds.add(noteId);
-            log(`Classification failed for ${noteId}: ${err instanceof Error ? err.message : String(err)}`);
+            log(`Note ${noteId} failed: ${err instanceof Error ? err.message : String(err)}`);
           }
         }
 
-        // Batch all result-notes into a single consume call (one popup)
-        if (resultNoteIds.length > 0) {
-          log(`Batch-consuming ${resultNoteIds.length} result-note(s): ${resultNoteIds.join(", ")}`);
-          try {
-            await consume({ accountId: myAccountId, notes: resultNoteIds });
-            resultNoteIds.forEach((id) => handledNoteIds.add(id));
-            log(`Result-notes consumed successfully`);
-          } catch (err) {
-            resultNoteIds.forEach((id) => handledNoteIds.add(id));
-            log(`Result-note batch consume failed: ${err instanceof Error ? err.message : String(err)}`);
+        // Read game state and board from account storage inside the lock.
+        // This replaces useAccount()-based reads that race with runExclusive.
+        try {
+          const accountIdObj = AccountId.fromBech32(myAccountId);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const wasmClient = (client as any).wasmWebClient;
+          if (wasmClient) {
+            const account = await wasmClient.getAccount(accountIdObj);
+            if (account) {
+              // Read game state from storage slots
+              const config = account.storage().getItem(SLOT_GAME_CONFIG);
+              const opponent = account.storage().getItem(SLOT_OPPONENT);
+              if (config && opponent) {
+                const configValues = config.toU64s();
+                const opponentValues = opponent.toU64s();
+                setGameState({
+                  phase: Number(configValues[2]) as GamePhase,
+                  expectedTurn: Number(configValues[3]),
+                  shipsHitCount: Number(opponentValues[2]),
+                  totalShotsReceived: Number(opponentValues[3]),
+                });
+              }
+
+              // Read board from packed row storage slots
+              const grid: Board = [];
+              for (let row = 0; row < GRID_SIZE; row++) {
+                const rowCells: BoardCell[] = [];
+                const rowWord = account.storage().getItem(SLOT_BOARD_ROWS[row]);
+                const packed = rowWord ? rowWord.toU64s()[0] : 0n;
+                for (let col = 0; col < GRID_SIZE; col++) {
+                  const state = Number((packed >> (BigInt(col) * 3n)) & 0x7n) as CellState;
+                  rowCells.push({ row, col, state });
+                }
+                grid.push(rowCells);
+              }
+              setMyBoard(grid);
+            }
           }
+        } catch (err) {
+          log(`State read error: ${err instanceof Error ? err.message : String(err)}`);
         }
-
-        // Process at most ONE shot-note per tick (each requires its own TX)
-        if (shotNotes.length > 0) {
-          const { id: shotId } = shotNotes[0];
-          log(`Consuming shot-note ${shotId} (${shotNotes.length} total queued)`);
-          try {
-            await consumeNote(shotId);
-            handledNoteIds.add(shotId);
-            log(`Shot-note ${shotId} consumed successfully`);
-          } catch (err) {
-            handledNoteIds.add(shotId);
-            log(`Shot-note consume failed for ${shotId}: ${err instanceof Error ? err.message : String(err)}`);
-          }
-        }
-
-        // SDK hooks already sync internally after each tx — just refetch notes
-        refetchNotes();
-      }
-
-      refetchState();
+      });
     } catch (err) {
-      log(`Sync error: ${err instanceof Error ? err.message : String(err)}`);
+      log(`Tick error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       busyRef.current = false;
     }
@@ -315,12 +279,7 @@ export function useGameplaySync(
     }
 
     log(`Starting gameplay sync (every ${AUTO_SYNC_INTERVAL_MS / 1000}s)`);
-
-    // Stable wrapper that always calls the latest tick via ref.
-    // This prevents the interval from being torn down and re-created
-    // (with an immediate tick() call) every time tick's dependencies change.
     const stableTick = () => tickRef.current();
-
     stableTick();
     intervalRef.current = setInterval(stableTick, AUTO_SYNC_INTERVAL_MS);
 
@@ -332,4 +291,6 @@ export function useGameplaySync(
       }
     };
   }, [enabled, myAccountId]);
+
+  return { gameState, myBoard };
 }

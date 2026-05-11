@@ -68,26 +68,50 @@ vi.mock("@/lib/miden", () => ({
   randomWord: vi.fn(() => ({ toFelts: vi.fn(() => [{ value: 0n }, { value: 0n }, { value: 0n }, { value: 0n }]) })),
 }));
 
+// Mock useGameplaySync to provide game state and board directly
+const mockUseGameplaySync = vi.fn();
+vi.mock("@/hooks/useGameplaySync", () => ({
+  useGameplaySync: (...args: unknown[]) => mockUseGameplaySync(...args),
+}));
+
 import { useAccount } from "@miden-sdk/react";
 import { createMockGameAccount } from "@/__tests__/fixtures/battleship";
 import { GamePlay } from "../GamePlay";
+import { CELL_WATER } from "@/types/game";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyAccount = any;
+
+function makeEmptyBoard() {
+  const grid = [];
+  for (let row = 0; row < 10; row++) {
+    const rowCells = [];
+    for (let col = 0; col < 10; col++) {
+      rowCells.push({ row, col, state: CELL_WATER });
+    }
+    grid.push(rowCells);
+  }
+  return grid;
+}
 
 describe("GamePlay", () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // Set up both game accounts
-    const accountA = createMockGameAccount({
-      id: "mtst1a",
-      phase: 2,
-      expectedTurn: 2,
-      shipsHitCount: 0,
-      totalShotsReceived: 0,
+    // useGameplaySync provides myState and myBoard for the player's own account
+    mockUseGameplaySync.mockReturnValue({
+      gameState: {
+        phase: 2,
+        expectedTurn: 2,
+        shipsHitCount: 0,
+        totalShotsReceived: 0,
+      },
+      myBoard: makeEmptyBoard(),
     });
-    const accountB = createMockGameAccount({
+
+    // useAccount is only called for the opponent (with undefined accountId),
+    // so return a mock for that
+    const opponentAccount = createMockGameAccount({
       id: "mtst1b",
       phase: 2,
       expectedTurn: 1,
@@ -95,18 +119,13 @@ describe("GamePlay", () => {
       totalShotsReceived: 0,
     });
 
-    let callCount = 0;
-    vi.mocked(useAccount).mockImplementation(() => {
-      callCount++;
-      const account = callCount % 2 === 1 ? accountA : accountB;
-      return {
-        account: account as AnyAccount,
-        assets: [],
-        isLoading: false,
-        error: null,
-        refetch: vi.fn(),
-        getBalance: vi.fn(() => 0n),
-      };
+    vi.mocked(useAccount).mockReturnValue({
+      account: opponentAccount as AnyAccount,
+      assets: [],
+      isLoading: false,
+      error: null,
+      refetch: vi.fn(),
+      getBalance: vi.fn(() => 0n),
     });
   });
 
@@ -119,13 +138,9 @@ describe("GamePlay", () => {
   });
 
   it("shows loading state when boards not ready", () => {
-    vi.mocked(useAccount).mockReturnValue({
-      account: null,
-      assets: [],
-      isLoading: true,
-      error: null,
-      refetch: vi.fn(),
-      getBalance: vi.fn(() => 0n),
+    mockUseGameplaySync.mockReturnValue({
+      gameState: null,
+      myBoard: null,
     });
 
     render(
