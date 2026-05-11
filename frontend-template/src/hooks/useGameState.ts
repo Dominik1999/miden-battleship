@@ -6,10 +6,7 @@ import type { GamePhase, GameState } from "@/types/game";
 
 export function useGameState(accountId: string, skipImport = false) {
   const { importAccount } = useImportAccount();
-  // When skipImport=true (opponent accounts), pass undefined to useAccount
-  // to prevent background WASM queries that race with gameplay sync operations.
-  // The opponent account can't be imported from the network anyway.
-  const { account, refetch } = useAccount(skipImport ? undefined : accountId);
+  const { account, refetch } = useAccount(accountId);
   const { sync } = useSyncState();
 
   // Import the game account so the local client tracks it.
