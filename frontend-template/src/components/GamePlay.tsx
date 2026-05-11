@@ -21,23 +21,24 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
   const myAccount = playerRole === "challenger" ? accountA : accountB;
   const opponentAccount = playerRole === "challenger" ? accountB : accountA;
 
-  const {
-    gameState: myState,
-    refetch: refetchMy,
-  } = useGameState(myAccount);
   // Skip importing opponent — their game account can't be imported from network
   const { gameState: opponentState, refetch: refetchOpponent } =
     useGameState(opponentAccount, true);
-  const { board: myBoard } = useBoardState(myAccount, false);
   const { board: opponentBoard } = useBoardState(opponentAccount, true);
 
-  const refetchAll = useCallback(() => {
-    refetchMy();
-    refetchOpponent();
-  }, [refetchMy, refetchOpponent]);
-
   const { fireShot, isSubmitting, isWaiting, error, walletConnected } =
-    useFireShot(opponentAccount, refetchAll);
+    useFireShot(opponentAccount, refetchOpponent);
+
+  const busy = isSubmitting || isWaiting;
+
+  // Auto-sync and auto-consume incoming shot notes on our game account.
+  // Game state and board are read inside runExclusive to avoid useAccount races.
+  // Use a ref for gameOver to break the circular dependency (sync → state → gameOver → sync).
+  const gameOverRef = useRef(false);
+  const { gameState: myState, myBoard } = useGameplaySync(
+    myAccount,
+    !busy && !gameOverRef.current,
+  );
 
   const {
     playShot, playDefeat,
@@ -84,16 +85,12 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
     return myState.totalShotsReceived > 0;
   })();
 
-  const busy = isSubmitting || isWaiting;
-
   // We can only detect our own loss from myState. Win detection relies on
   // opponentState (if available) or phase transition.
   const iLost = myState ? myState.shipsHitCount >= TOTAL_SHIP_CELLS : false;
   const iWon = opponentState ? opponentState.shipsHitCount >= TOTAL_SHIP_CELLS : false;
   const gameOver = iLost || iWon;
-
-  // Auto-sync and auto-consume incoming shot notes on our game account.
-  useGameplaySync(myAccount, !busy && !gameOver, refetchAll);
+  gameOverRef.current = gameOver;
 
   // Sound effects on own state changes
   const prevMyHits = useRef<number | null>(null);

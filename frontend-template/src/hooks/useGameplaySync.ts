@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { useMidenClient, useMiden, useNotes } from "@miden-sdk/react";
 import {
   TransactionRequestBuilder,
@@ -16,7 +16,8 @@ import {
   FeltArray,
   Word,
 } from "@miden-sdk/miden-sdk";
-import { AUTO_SYNC_INTERVAL_MS, SLOT_BOARD_ROWS, SLOT_OPPONENT, TOTAL_SHIP_CELLS } from "@/config";
+import { AUTO_SYNC_INTERVAL_MS, SLOT_BOARD_ROWS, SLOT_GAME_CONFIG, SLOT_OPPONENT, GRID_SIZE, TOTAL_SHIP_CELLS } from "@/config";
+import type { GameState, GamePhase, Board, BoardCell, CellState } from "@/types/game";
 
 const log = (msg: string, ...args: unknown[]) =>
   console.log(
@@ -41,13 +42,15 @@ let preGameNoteIds: Set<string> | null = null;
 export function useGameplaySync(
   myAccountId: string,
   enabled: boolean,
-  _refetchState: () => void,
 ) {
   const client = useMidenClient();
   const { runExclusive } = useMiden();
   const { notes: allNotes } = useNotes(
     myAccountId ? { accountId: myAccountId } : undefined,
   );
+
+  const [gameState, setGameState] = useState<GameState | null>(null);
+  const [myBoard, setMyBoard] = useState<Board | null>(null);
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const busyRef = useRef(false);
@@ -181,40 +184,82 @@ export function useGameplaySync(
             !(preGameNoteIds?.has(n.id().toString()) ?? false),
         );
 
-        if (pending.length === 0) return;
-        log(`Found ${pending.length} pending note(s)`);
+        if (pending.length > 0) {
+          log(`Found ${pending.length} pending note(s)`);
 
-        // Process ONE note per tick to keep proving time bounded
-        const noteId = pending[0].id().toString();
+          // Process ONE note per tick to keep proving time bounded
+          const noteId = pending[0].id().toString();
 
-        try {
-          const txRequest = await classifyAndBuildRequest(noteId);
-          if (txRequest === "skip") {
+          try {
+            const txRequest = await classifyAndBuildRequest(noteId);
+            if (txRequest === "skip") {
+              handledNoteIds.add(noteId);
+            } else {
+              const accountIdObj = AccountId.fromBech32(myAccountId);
+
+              if (txRequest === null) {
+                // Result-note: simple consume via raw client
+                log(`Consuming result-note ${noteId}...`);
+                const noteRecord = await client.getInputNote(noteId);
+                if (!noteRecord) throw new Error(`Note ${noteId} not found`);
+                const consumeRequest = client.newConsumeTransactionRequest([noteRecord.toNote()]);
+                await client.submitNewTransaction(accountIdObj, consumeRequest);
+                handledNoteIds.add(noteId);
+                log(`Result-note ${noteId} consumed`);
+              } else {
+                // Shot-note: custom TX via raw client
+                log(`Consuming shot-note ${noteId}...`);
+                await client.submitNewTransaction(accountIdObj, txRequest);
+                handledNoteIds.add(noteId);
+                log(`Shot-note ${noteId} consumed`);
+              }
+            }
+          } catch (err) {
             handledNoteIds.add(noteId);
-            return;
+            log(`Note ${noteId} failed: ${err instanceof Error ? err.message : String(err)}`);
           }
+        }
 
+        // Read game state and board from account storage inside the lock.
+        // This replaces useAccount()-based reads that race with runExclusive.
+        try {
           const accountIdObj = AccountId.fromBech32(myAccountId);
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const wasmClient = (client as any).wasmWebClient;
+          if (wasmClient) {
+            const account = await wasmClient.getAccount(accountIdObj);
+            if (account) {
+              // Read game state from storage slots
+              const config = account.storage().getItem(SLOT_GAME_CONFIG);
+              const opponent = account.storage().getItem(SLOT_OPPONENT);
+              if (config && opponent) {
+                const configValues = config.toU64s();
+                const opponentValues = opponent.toU64s();
+                setGameState({
+                  phase: Number(configValues[2]) as GamePhase,
+                  expectedTurn: Number(configValues[3]),
+                  shipsHitCount: Number(opponentValues[2]),
+                  totalShotsReceived: Number(opponentValues[3]),
+                });
+              }
 
-          if (txRequest === null) {
-            // Result-note: simple consume via raw client
-            log(`Consuming result-note ${noteId}...`);
-            const noteRecord = await client.getInputNote(noteId);
-            if (!noteRecord) throw new Error(`Note ${noteId} not found`);
-            const consumeRequest = client.newConsumeTransactionRequest([noteRecord.toNote()]);
-            await client.submitNewTransaction(accountIdObj, consumeRequest);
-            handledNoteIds.add(noteId);
-            log(`Result-note ${noteId} consumed`);
-          } else {
-            // Shot-note: custom TX via raw client
-            log(`Consuming shot-note ${noteId}...`);
-            await client.submitNewTransaction(accountIdObj, txRequest);
-            handledNoteIds.add(noteId);
-            log(`Shot-note ${noteId} consumed`);
+              // Read board from packed row storage slots
+              const grid: Board = [];
+              for (let row = 0; row < GRID_SIZE; row++) {
+                const rowCells: BoardCell[] = [];
+                const rowWord = account.storage().getItem(SLOT_BOARD_ROWS[row]);
+                const packed = rowWord ? rowWord.toU64s()[0] : 0n;
+                for (let col = 0; col < GRID_SIZE; col++) {
+                  const state = Number((packed >> (BigInt(col) * 3n)) & 0x7n) as CellState;
+                  rowCells.push({ row, col, state });
+                }
+                grid.push(rowCells);
+              }
+              setMyBoard(grid);
+            }
           }
         } catch (err) {
-          handledNoteIds.add(noteId);
-          log(`Note ${noteId} failed: ${err instanceof Error ? err.message : String(err)}`);
+          log(`State read error: ${err instanceof Error ? err.message : String(err)}`);
         }
       });
     } catch (err) {
@@ -246,4 +291,6 @@ export function useGameplaySync(
       }
     };
   }, [enabled, myAccountId]);
+
+  return { gameState, myBoard };
 }
