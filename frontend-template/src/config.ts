@@ -1,6 +1,6 @@
 // Result note script root (from deploy_testnet.rs output)
 // Replace with actual values after deployment
-export const RESULT_SCRIPT_ROOT: [bigint, bigint, bigint, bigint] = [15171288892435243614n, 10295758693372466955n, 709059778587687919n, 9826546822224790371n];
+export const RESULT_SCRIPT_ROOT: [bigint, bigint, bigint, bigint] = [13232724772415188809n, 5322587103964411589n, 13935803814690356079n, 5376048464042206956n];
 
 // Storage slot names (must match contract)
 export const SLOT_GAME_CONFIG =

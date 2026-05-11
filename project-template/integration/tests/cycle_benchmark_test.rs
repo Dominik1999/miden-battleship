@@ -638,3 +638,13 @@ async fn benchmark_summary() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn print_result_script_root() {
+    let pkg = build_project_in_dir(Path::new("../contracts/result-note"), true).unwrap();
+    let script = NoteScript::from_library(&pkg.mast).expect("from_library");
+    let root = script.root();
+    println!("\n=== RESULT_SCRIPT_ROOT for config.ts ===");
+    println!("[{}n, {}n, {}n, {}n]", root[0].as_canonical_u64(), root[1].as_canonical_u64(), root[2].as_canonical_u64(), root[3].as_canonical_u64());
+    println!("========================================\n");
+}
