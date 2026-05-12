@@ -13,10 +13,7 @@ function getCellFromPacked(packed: bigint, col: number): number {
  * In opponent mode, ship cells are hidden (shown as CELL_WATER unless hit/miss).
  */
 export function useBoardState(accountId: string, isOpponent: boolean) {
-  // When isOpponent=true, pass undefined to useAccount to prevent background
-  // WASM queries that race with gameplay sync operations. Opponent boards show
-  // all-water anyway (we can't read their storage).
-  const { account } = useAccount(isOpponent ? undefined : accountId);
+  const { account } = useAccount(accountId);
 
   const board = useMemo<Board | null>(() => {
     // For opponent boards, return an empty (all water) grid if the account

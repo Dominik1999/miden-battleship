@@ -98,29 +98,20 @@ describe("GamePlay", () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
-    // useGameplaySync provides myState and myBoard for the player's own account
-    mockUseGameplaySync.mockReturnValue({
-      gameState: {
-        phase: 2,
-        expectedTurn: 2,
-        shipsHitCount: 0,
-        totalShotsReceived: 0,
-      },
-      myBoard: makeEmptyBoard(),
-    });
+    // useGameplaySync only handles sync+consume now, no state/board
+    mockUseGameplaySync.mockReturnValue({});
 
-    // useAccount is only called for the opponent (with undefined accountId),
-    // so return a mock for that
-    const opponentAccount = createMockGameAccount({
-      id: "mtst1b",
+    // useAccount is called for both player's own account and opponent
+    const myAccount = createMockGameAccount({
+      id: "mtst1a",
       phase: 2,
-      expectedTurn: 1,
+      expectedTurn: 2,
       shipsHitCount: 0,
       totalShotsReceived: 0,
     });
 
     vi.mocked(useAccount).mockReturnValue({
-      account: opponentAccount as AnyAccount,
+      account: myAccount as AnyAccount,
       assets: [],
       isLoading: false,
       error: null,
@@ -138,9 +129,14 @@ describe("GamePlay", () => {
   });
 
   it("shows loading state when boards not ready", () => {
-    mockUseGameplaySync.mockReturnValue({
-      gameState: null,
-      myBoard: null,
+    mockUseGameplaySync.mockReturnValue({});
+    vi.mocked(useAccount).mockReturnValue({
+      account: null,
+      assets: [],
+      isLoading: true,
+      error: null,
+      refetch: vi.fn(),
+      getBalance: vi.fn(() => 0n),
     });
 
     render(

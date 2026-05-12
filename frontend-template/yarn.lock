@@ -637,12 +637,11 @@
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
 
-"@miden-sdk/miden-sdk@0.14.5":
-  version "0.14.5"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-sdk/-/miden-sdk-0.14.5.tgz#78898defd28a3dd841f75c928db31a342e7a7398"
-  integrity sha512-lXaO8mWE6GuaTmTCGtKE6XzDxQl83MMFlYvuuQnWHEcdmnENu1LYG9/WVyCveiJQr2VSMMkhc+lQEaqKhrOvOg==
+"@miden-sdk/miden-sdk@0.14.8":
+  version "0.14.8"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/miden-sdk/-/miden-sdk-0.14.8.tgz#c096f695cf97724415c5f835274307d68e332aa3"
+  integrity sha512-x27whVObMTQBpsqU/srRH+6mm3MVfw2w64YHAVLYVW7NQ1Ch6pkzTe8BEvsMkkZ0OmENT3HSJ0mQcK0pILjNkg==
   dependencies:
-    "@rollup/plugin-typescript" "^12.3.0"
     dexie "^4.0.1"
     glob "^11.0.0"
 
@@ -687,39 +686,22 @@
     "@miden-sdk/miden-wallet-adapter-react" "^0.14.3"
     "@miden-sdk/miden-wallet-adapter-reactui" "^0.14.3"
 
-"@miden-sdk/react@0.14.5":
-  version "0.14.5"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/react/-/react-0.14.5.tgz#d527b6c388783238553b15c70f5a4a5bbe09821d"
-  integrity sha512-j8uHdmUVitQZ9yP2sRsbNulDy6Mf8pjfRyWMt7eQ9r3fvaQuc7R2iKJuOMcgvMVrhn0nWrCXxgeRwzts9L+ogQ==
+"@miden-sdk/react@0.14.8":
+  version "0.14.8"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/react/-/react-0.14.8.tgz#5eb631785c0b7169ee53d44f587f83c0d9930d0c"
+  integrity sha512-uh93Ya5jjR6H2Dm2dpfw76opNKFJw9KIoxJr7ZvdjxGYZuG3I6QGtwXPT4LKK8CDA6svz63urdd+gpHGHo5QfA==
   dependencies:
     zustand "^5.0.0"
 
-"@miden-sdk/vite-plugin@0.14.5":
-  version "0.14.5"
-  resolved "https://registry.yarnpkg.com/@miden-sdk/vite-plugin/-/vite-plugin-0.14.5.tgz#7fdd323c418fe8042521009aa00bf9cccadbc0cb"
-  integrity sha512-7F8HQrtqT+K2b2oYv0sJ5tYBV091bE0yBYZBlsR7uRzsXrWKBfknDPRzlu+jNhFJKwlggKNGZrPoreTXb4qNoA==
+"@miden-sdk/vite-plugin@0.14.8":
+  version "0.14.8"
+  resolved "https://registry.yarnpkg.com/@miden-sdk/vite-plugin/-/vite-plugin-0.14.8.tgz#f017be81a4ca0a5fea9d207309d6f26ae3aee758"
+  integrity sha512-y76Ea2epv+Mqv/wFVa5rj7a5YgULklPAJHWnj75qNYqtpp8nUaoM1hgepRMGgH7vcYmVH/fMPT4pc3l/LGMUYg==
 
 "@rolldown/pluginutils@1.0.0-beta.27":
   version "1.0.0-beta.27"
   resolved "https://registry.yarnpkg.com/@rolldown/pluginutils/-/pluginutils-1.0.0-beta.27.tgz#47d2bf4cef6d470b22f5831b420f8964e0bf755f"
   integrity sha512-+d0F4MKMCbeVUJwG96uQ4SgAznZNSq93I3V+9NHA4OpvqG8mRCpGdKmK8l/dl02h2CCDHwW2FqilnTyDcAnqjA==
-
-"@rollup/plugin-typescript@^12.3.0":
-  version "12.3.0"
-  resolved "https://registry.yarnpkg.com/@rollup/plugin-typescript/-/plugin-typescript-12.3.0.tgz#cc51b830973bc14c9456fe6532f322f2a40f5f12"
-  integrity sha512-7DP0/p7y3t67+NabT9f8oTBFE6gGkto4SA6Np2oudYmZE/m1dt8RB0SjL1msMxFpLo631qjRCcBlAbq1ml/Big==
-  dependencies:
-    "@rollup/pluginutils" "^5.1.0"
-    resolve "^1.22.1"
-
-"@rollup/pluginutils@^5.1.0":
-  version "5.3.0"
-  resolved "https://registry.yarnpkg.com/@rollup/pluginutils/-/pluginutils-5.3.0.tgz#57ba1b0cbda8e7a3c597a4853c807b156e21a7b4"
-  integrity sha512-5EdhGZtnu3V88ces7s53hhfK5KSASnJZv8Lulpc04cWO3REESroJXg73DFsOmgbU2BhwV0E20bu2IDZb3VKW4Q==
-  dependencies:
-    "@types/estree" "^1.0.0"
-    estree-walker "^2.0.2"
-    picomatch "^4.0.2"
 
 "@rollup/rollup-android-arm-eabi@4.59.0":
   version "4.59.0"
@@ -1364,6 +1346,11 @@ dequal@^2.0.3:
   resolved "https://registry.yarnpkg.com/dequal/-/dequal-2.0.3.tgz#2644214f1997d39ed0ee0ece72335490a7ac67be"
   integrity sha512-0je+qPKHEMohvfRTCEo3CrPG6cAzAYgmzKyxRiYSSDkS6eGJdyVJm7WaYA5ECaAD9wLB2T4EEeymA5aFVcYXCA==
 
+dexie@4.4.2:
+  version "4.4.2"
+  resolved "https://registry.yarnpkg.com/dexie/-/dexie-4.4.2.tgz#447511328c982baaf6a88c736ddc08484916886c"
+  integrity sha512-zMtV8q79EFE5U8FKZvt0Y/77PCU/Hr/RDxv1EDeo228L+m/HTbeN2AjoQm674rhQCX8n3ljK87lajt7UQuZfvw==
+
 dexie@^4.0.1:
   version "4.3.0"
   resolved "https://registry.yarnpkg.com/dexie/-/dexie-4.3.0.tgz#5b6b9e3ed4e48ba1c36442e6a7d07b86335e2df5"
@@ -1569,11 +1556,6 @@ estraverse@^5.1.0, estraverse@^5.2.0:
   resolved "https://registry.yarnpkg.com/estraverse/-/estraverse-5.3.0.tgz#2eea5290702f26ab8fe5370370ff86c965d21123"
   integrity sha512-MMdARuVEQziNTeJD8DgMqmhwR11BRQ/cBP+pLtYdSTnf3MIO8fFeiINEbX36ZdNlfU/7A9f3gUw49B3oQsvwBA==
 
-estree-walker@^2.0.2:
-  version "2.0.2"
-  resolved "https://registry.yarnpkg.com/estree-walker/-/estree-walker-2.0.2.tgz#52f010178c2a4c117a7757cfe942adb7d2da4cac"
-  integrity sha512-Rfkk/Mp/DL7JVje3u18FxFujQlTNR2q6QfMSMB7AvCBx91NGj/ba3kCfza0f6dVDbw7YlRf/nDrn7pQrCCyQ/w==
-
 estree-walker@^3.0.3:
   version "3.0.3"
   resolved "https://registry.yarnpkg.com/estree-walker/-/estree-walker-3.0.3.tgz#67c3e549ec402a487b4fc193d1953a524752340d"
@@ -1657,11 +1639,6 @@ fsevents@~2.3.2, fsevents@~2.3.3:
   resolved "https://registry.yarnpkg.com/fsevents/-/fsevents-2.3.3.tgz#cac6407785d03675a2a5e1a5305c697b347d90d6"
   integrity sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==
 
-function-bind@^1.1.2:
-  version "1.1.2"
-  resolved "https://registry.yarnpkg.com/function-bind/-/function-bind-1.1.2.tgz#2c02d864d97f3ea6c8830c464cbd11ab6eab7a1c"
-  integrity sha512-7XHNxH7qX9xG5mIwxkhumTox/MIRNcOgDrxWsMt2pAr23WHp6MrRlN7FBSFpCpr+oVO0F744iUgR82nJMfG2SA==
-
 gensync@^1.0.0-beta.2:
   version "1.0.0-beta.2"
   resolved "https://registry.yarnpkg.com/gensync/-/gensync-1.0.0-beta.2.tgz#32a6ee76c3d7f52d46b2b1ae5d93fea8580a25e0"
@@ -1700,13 +1677,6 @@ has-flag@^4.0.0:
   version "4.0.0"
   resolved "https://registry.yarnpkg.com/has-flag/-/has-flag-4.0.0.tgz#944771fd9c81c81265c4d6941860da06bb59479b"
   integrity sha512-EykJT/Q1KjTWctppgIAgfSO0tKVuZUjhgMr17kqTumMl6Afv3EISleU7qZUzoXDFTAHTDC4NOoG/ZxU3EvlMPQ==
-
-hasown@^2.0.2:
-  version "2.0.2"
-  resolved "https://registry.yarnpkg.com/hasown/-/hasown-2.0.2.tgz#003eaf91be7adc372e84ec59dc37252cedb80003"
-  integrity sha512-0hJU9SCPvmMzIBdZFqNPXWa6dqh7WdH0cII9y+CyS8rG3nL48Bclra9HmKhVVUHyPWNH5Y7xDwAB7bfgSjkUMQ==
-  dependencies:
-    function-bind "^1.1.2"
 
 html-encoding-sniffer@^6.0.0:
   version "6.0.0"
@@ -1758,13 +1728,6 @@ indent-string@^4.0.0:
   version "4.0.0"
   resolved "https://registry.yarnpkg.com/indent-string/-/indent-string-4.0.0.tgz#624f8f4497d619b2d9768531d58f4122854d7251"
   integrity sha512-EdDDZu4A2OyIK7Lr/2zG+w5jmbuk1DVBnEwREQvBzspBJkCEbRa8GxU1lghYcaGJCnRWibjDXlq779X1/y5xwg==
-
-is-core-module@^2.16.1:
-  version "2.16.1"
-  resolved "https://registry.yarnpkg.com/is-core-module/-/is-core-module-2.16.1.tgz#2a98801a849f43e2add644fbb6bc6229b19a4ef4"
-  integrity sha512-UfoeMA6fIJ8wTYFEUjelnaGI67v6+N7qXJEvQuIGa99l4xsCruSYOVSQ0uPANn4dAzm8lkYPaKLrrijLq7x23w==
-  dependencies:
-    hasown "^2.0.2"
 
 is-extglob@^2.1.1:
   version "2.1.1"
@@ -2024,11 +1987,6 @@ path-key@^3.1.0:
   resolved "https://registry.yarnpkg.com/path-key/-/path-key-3.1.1.tgz#581f6ade658cbba65a0d3380de7753295054f375"
   integrity sha512-ojmeN0qd+y0jszEtoY48r0Peq5dwMEkIlCOu6Q5f41lfkswXuKtYrhgoTpLnyIcHm24Uhqx+5Tqm2InSwLhE6Q==
 
-path-parse@^1.0.7:
-  version "1.0.7"
-  resolved "https://registry.yarnpkg.com/path-parse/-/path-parse-1.0.7.tgz#fbc114b60ca42b30d9daf5858e4bd68bbedb6735"
-  integrity sha512-LDJzPVEEEPR+y48z93A0Ed0yXb8pAByGWo/k5YYdYgpY2/2EsOsksJrq7lOHxryrVOn1ejG6oAp8ahvOIQD8sw==
-
 path-scurry@^2.0.0:
   version "2.0.2"
   resolved "https://registry.yarnpkg.com/path-scurry/-/path-scurry-2.0.2.tgz#6be0d0ee02a10d9e0de7a98bae65e182c9061f85"
@@ -2119,15 +2077,6 @@ resolve-from@^4.0.0:
   version "4.0.0"
   resolved "https://registry.yarnpkg.com/resolve-from/-/resolve-from-4.0.0.tgz#4abcd852ad32dd7baabfe9b40e00a36db5f392e6"
   integrity sha512-pb/MYmXstAkysRFx8piNI1tGFNQIFA3vkE3Gq4EuA1dF6gHp/+vgZqsCGJapvy8N3Q+4o7FwvquPJcnZ7RYy4g==
-
-resolve@^1.22.1:
-  version "1.22.11"
-  resolved "https://registry.yarnpkg.com/resolve/-/resolve-1.22.11.tgz#aad857ce1ffb8bfa9b0b1ac29f1156383f68c262"
-  integrity sha512-RfqAvLnMl313r7c9oclB1HhUEAezcpLjz95wFH4LVuhk9JF/r22qmVP9AMmOU4vMX7Q8pN8jwNg/CSpdFnMjTQ==
-  dependencies:
-    is-core-module "^2.16.1"
-    path-parse "^1.0.7"
-    supports-preserve-symlinks-flag "^1.0.0"
 
 rollup@^4.34.9, rollup@^4.43.0:
   version "4.59.0"
@@ -2240,11 +2189,6 @@ supports-color@^7.1.0:
   integrity sha512-qpCAvRl9stuOHveKsn7HncJRvv501qIacKzQlO/+Lwxc9+0q2wLyv4Dfvt80/DPn2pqOBsJdDiogXGR9+OvwRw==
   dependencies:
     has-flag "^4.0.0"
-
-supports-preserve-symlinks-flag@^1.0.0:
-  version "1.0.0"
-  resolved "https://registry.yarnpkg.com/supports-preserve-symlinks-flag/-/supports-preserve-symlinks-flag-1.0.0.tgz#6eda4bd344a3c94aea376d4cc31bc77311039e09"
-  integrity sha512-ot0WnXS9fgdkgIcePe6RHNk1WA8+muPa6cSjeR3V8K27q9BB1rTE3R1p7Hv0z1ZyAc8s6Vvv8DIyWf681MAt0w==
 
 symbol-tree@^3.2.4:
   version "3.2.4"

@@ -1,31 +1,22 @@
 import { useMemo, useEffect, useRef } from "react";
 import { useAccount, useImportAccount, useSyncState } from "@miden-sdk/react";
-// SDK types used at runtime via account.storage() — no direct constructor usage needed here
 import { SLOT_GAME_CONFIG, SLOT_OPPONENT } from "@/config";
 import type { GamePhase, GameState } from "@/types/game";
 
 export function useGameState(accountId: string, skipImport = false) {
   const { importAccount } = useImportAccount();
-  // When skipImport=true (opponent accounts), pass undefined to useAccount
-  // to prevent background WASM queries that race with gameplay sync operations.
-  // The opponent account can't be imported from the network anyway.
-  const { account, refetch } = useAccount(skipImport ? undefined : accountId);
+  const { account, refetch } = useAccount(accountId);
   const { sync } = useSyncState();
 
   // Import the game account so the local client tracks it.
-  // Guard with a ref to only attempt once per accountId, preventing
-  // concurrent WASM access when two useGameState hooks mount together.
+  // Guard with a ref to only attempt once per accountId.
   // skipImport=true for opponent accounts that can't be imported from network.
   const importedRef = useRef<string | null>(null);
   useEffect(() => {
     if (skipImport) return;
     if (!accountId || importedRef.current === accountId) return;
     importedRef.current = accountId;
-    // Small delay to avoid racing with the other useGameState instance
-    const timer = setTimeout(() => {
-      importAccount({ type: "id", accountId }).catch(() => {});
-    }, 500);
-    return () => clearTimeout(timer);
+    importAccount({ type: "id", accountId }).catch(() => {});
   }, [importAccount, accountId, skipImport]);
 
   const gameState = useMemo<GameState | null>(() => {

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useCallback, useState } from "react";
-import { useMidenClient, useMiden, useNotes } from "@miden-sdk/react";
+import { useEffect, useRef, useCallback } from "react";
+import { useMidenClient, useMiden, useNotes, useAccount } from "@miden-sdk/react";
 import {
   TransactionRequestBuilder,
   NoteAndArgs,
@@ -16,8 +16,7 @@ import {
   FeltArray,
   Word,
 } from "@miden-sdk/miden-sdk";
-import { AUTO_SYNC_INTERVAL_MS, SLOT_BOARD_ROWS, SLOT_GAME_CONFIG, SLOT_OPPONENT, GRID_SIZE, TOTAL_SHIP_CELLS } from "@/config";
-import type { GameState, GamePhase, Board, BoardCell, CellState } from "@/types/game";
+import { AUTO_SYNC_INTERVAL_MS, SLOT_BOARD_ROWS, SLOT_OPPONENT, TOTAL_SHIP_CELLS } from "@/config";
 
 const log = (msg: string, ...args: unknown[]) =>
   console.log(
@@ -35,9 +34,8 @@ let preGameNoteIds: Set<string> | null = null;
  * Syncs from the network and auto-consumes incoming notes (opponent shots
  * and result notes) on the player's own game account during gameplay.
  *
- * IMPORTANT: All WASM client access is serialized through a single
- * runExclusive() call per tick to prevent borrow_fail races with
- * background SDK hook queries (useAccount re-fetching on lastSyncTime).
+ * Raw WebClient operations (syncState, getInputNotes, submitNewTransaction)
+ * are serialized through runExclusive() to avoid concurrent WASM access.
  */
 export function useGameplaySync(
   myAccountId: string,
@@ -48,9 +46,9 @@ export function useGameplaySync(
   const { notes: allNotes } = useNotes(
     myAccountId ? { accountId: myAccountId } : undefined,
   );
-
-  const [gameState, setGameState] = useState<GameState | null>(null);
-  const [myBoard, setMyBoard] = useState<Board | null>(null);
+  const { refetch: refetchAccount } = useAccount(myAccountId);
+  const refetchRef = useRef(refetchAccount);
+  refetchRef.current = refetchAccount;
 
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const busyRef = useRef(false);
@@ -99,10 +97,14 @@ export function useGameplaySync(
       log(`Note ${noteIdStr}: ${noteInputs.length} inputs`);
 
       if (noteInputs.length === 4) {
-        // Result-note
+        // Result-note: skip — these target the shooter's wallet, not the
+        // defender's game account. The defender already knows hit/miss from
+        // the board state updated during shot consumption. Consuming a
+        // result note meant for another account causes nullifier conflicts
+        // and can crash the WASM prover (capacity overflow panic).
         const encodedResult = noteInputs[3].asInt();
-        log(`Result note: result=${encodedResult / 2n === 1n ? "HIT" : "MISS"}, gameOver=${encodedResult % 2n}`);
-        return null;
+        log(`Result note (skipping — targets shooter): result=${encodedResult / 2n === 1n ? "HIT" : "MISS"}, gameOver=${encodedResult % 2n}`);
+        return "skip" as const;
       }
 
       if (noteInputs.length !== 14) {
@@ -195,24 +197,12 @@ export function useGameplaySync(
             if (txRequest === "skip") {
               handledNoteIds.add(noteId);
             } else {
+              // Shot-note: custom TX via raw client
               const accountIdObj = AccountId.fromBech32(myAccountId);
-
-              if (txRequest === null) {
-                // Result-note: simple consume via raw client
-                log(`Consuming result-note ${noteId}...`);
-                const noteRecord = await client.getInputNote(noteId);
-                if (!noteRecord) throw new Error(`Note ${noteId} not found`);
-                const consumeRequest = client.newConsumeTransactionRequest([noteRecord.toNote()]);
-                await client.submitNewTransaction(accountIdObj, consumeRequest);
-                handledNoteIds.add(noteId);
-                log(`Result-note ${noteId} consumed`);
-              } else {
-                // Shot-note: custom TX via raw client
-                log(`Consuming shot-note ${noteId}...`);
-                await client.submitNewTransaction(accountIdObj, txRequest);
-                handledNoteIds.add(noteId);
-                log(`Shot-note ${noteId} consumed`);
-              }
+              log(`Consuming shot-note ${noteId}...`);
+              await client.submitNewTransaction(accountIdObj, txRequest);
+              handledNoteIds.add(noteId);
+              log(`Shot-note ${noteId} consumed`);
             }
           } catch (err) {
             handledNoteIds.add(noteId);
@@ -220,48 +210,10 @@ export function useGameplaySync(
           }
         }
 
-        // Read game state and board from account storage inside the lock.
-        // This replaces useAccount()-based reads that race with runExclusive.
-        try {
-          const accountIdObj = AccountId.fromBech32(myAccountId);
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const wasmClient = (client as any).wasmWebClient;
-          if (wasmClient) {
-            const account = await wasmClient.getAccount(accountIdObj);
-            if (account) {
-              // Read game state from storage slots
-              const config = account.storage().getItem(SLOT_GAME_CONFIG);
-              const opponent = account.storage().getItem(SLOT_OPPONENT);
-              if (config && opponent) {
-                const configValues = config.toU64s();
-                const opponentValues = opponent.toU64s();
-                setGameState({
-                  phase: Number(configValues[2]) as GamePhase,
-                  expectedTurn: Number(configValues[3]),
-                  shipsHitCount: Number(opponentValues[2]),
-                  totalShotsReceived: Number(opponentValues[3]),
-                });
-              }
-
-              // Read board from packed row storage slots
-              const grid: Board = [];
-              for (let row = 0; row < GRID_SIZE; row++) {
-                const rowCells: BoardCell[] = [];
-                const rowWord = account.storage().getItem(SLOT_BOARD_ROWS[row]);
-                const packed = rowWord ? rowWord.toU64s()[0] : 0n;
-                for (let col = 0; col < GRID_SIZE; col++) {
-                  const state = Number((packed >> (BigInt(col) * 3n)) & 0x7n) as CellState;
-                  rowCells.push({ row, col, state });
-                }
-                grid.push(rowCells);
-              }
-              setMyBoard(grid);
-            }
-          }
-        } catch (err) {
-          log(`State read error: ${err instanceof Error ? err.message : String(err)}`);
-        }
       });
+      // Trigger useAccount refetch so the UI picks up state changes
+      // made via raw client.submitNewTransaction() inside runExclusive.
+      refetchRef.current();
     } catch (err) {
       log(`Tick error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
@@ -292,5 +244,5 @@ export function useGameplaySync(
     };
   }, [enabled, myAccountId]);
 
-  return { gameState, myBoard };
+  return {};
 }

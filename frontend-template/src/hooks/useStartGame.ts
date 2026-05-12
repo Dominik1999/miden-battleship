@@ -9,7 +9,7 @@ import {
   useSyncState,
 } from "@miden-sdk/react";
 import { useMidenFiWallet } from "@miden-sdk/miden-wallet-adapter";
-import { AccountId, Address, Felt, NetworkId, NoteTag } from "@miden-sdk/miden-sdk";
+import { AccountId, Address, Felt, NetworkId, NoteTag, NoteFilter, NoteFilterTypes } from "@miden-sdk/miden-sdk";
 import { randomWord } from "@/lib/miden";
 import {
   loadPackage,
@@ -311,6 +311,22 @@ export function useStartGame() {
         log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Waiting ${delay / 1000}s then syncing...`);
         await new Promise((r) => setTimeout(r, delay));
         await sync();
+
+        // Diagnostic: dump what notes are in the local store after sync
+        try {
+          const allLocal = await client.getInputNotes(new NoteFilter(NoteFilterTypes.All));
+          const committedLocal = await client.getInputNotes(new NoteFilter(NoteFilterTypes.Committed));
+          log(`[diag] After sync — ALL notes in store: ${allLocal.length}, COMMITTED: ${committedLocal.length}`);
+          allLocal.forEach((n: { id: () => { toString: () => string }; isConsumed: () => boolean; isProcessing: () => boolean; isAuthenticated: () => boolean }, i: number) => {
+            log(`[diag]   [${i}] id=${n.id().toString()}, consumed=${n.isConsumed()}, processing=${n.isProcessing()}, auth=${n.isAuthenticated()}`);
+          });
+          log(`[diag] Looking for setup note: ${setupNoteId}`);
+          const match = allLocal.find((n: { id: () => { toString: () => string } }) => n.id().toString() === setupNoteId);
+          log(`[diag] Found in local store? ${match ? "YES" : "NO"}`);
+        } catch (diagErr) {
+          log(`[diag] Error querying local store: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`);
+        }
+
         try {
           const setupResult = await consume({ accountId: gameAccountAddress, notes: [setupNoteId] });
           log(`Setup consume succeeded! TX: ${JSON.stringify(setupResult)}`);

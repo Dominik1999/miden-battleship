@@ -21,6 +21,10 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
   const myAccount = playerRole === "challenger" ? accountA : accountB;
   const opponentAccount = playerRole === "challenger" ? accountB : accountA;
 
+  // Read game state and board from SDK hooks (no workarounds needed since SDK 0.14.8)
+  const { gameState: myState } = useGameState(myAccount);
+  const { board: myBoard } = useBoardState(myAccount, false);
+
   // Skip importing opponent — their game account can't be imported from network
   const { gameState: opponentState, refetch: refetchOpponent } =
     useGameState(opponentAccount, true);
@@ -32,10 +36,9 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
   const busy = isSubmitting || isWaiting;
 
   // Auto-sync and auto-consume incoming shot notes on our game account.
-  // Game state and board are read inside runExclusive to avoid useAccount races.
   // Use a ref for gameOver to break the circular dependency (sync → state → gameOver → sync).
   const gameOverRef = useRef(false);
-  const { gameState: myState, myBoard } = useGameplaySync(
+  useGameplaySync(
     myAccount,
     !busy && !gameOverRef.current,
   );

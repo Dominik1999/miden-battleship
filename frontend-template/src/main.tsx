@@ -1,14 +1,7 @@
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
-import { clearMidenStorage } from "@miden-sdk/react";
-import "./index.css";
-import App from "./App.tsx";
+// Clear any Dexie instance registered by the wallet extension to prevent
+// version conflict with the SDK's bundled Dexie (Symbol.for("Dexie") is
+// a cross-realm global that Dexie uses to detect duplicate loading).
+delete (globalThis as Record<symbol, unknown>)[Symbol.for("Dexie")];
 
-// Nuke all Miden IndexedDB state on every page load so each session starts fresh.
-clearMidenStorage().then(() => {
-  createRoot(document.getElementById("root")!).render(
-    <StrictMode>
-      <App />
-    </StrictMode>,
-  );
-});
+// Dynamic import so the SDK modules load AFTER the Dexie symbol is cleared.
+import("./boot.tsx");

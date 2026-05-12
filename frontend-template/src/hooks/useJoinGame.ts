@@ -9,7 +9,7 @@ import {
   useSyncState,
 } from "@miden-sdk/react";
 import { useMidenFiWallet } from "@miden-sdk/miden-wallet-adapter";
-import { AccountId, NoteTag } from "@miden-sdk/miden-sdk";
+import { AccountId, NoteTag, NoteFilter, NoteFilterTypes } from "@miden-sdk/miden-sdk";
 import { randomWord } from "@/lib/miden";
 import {
   loadPackage,
@@ -303,6 +303,16 @@ export function useJoinGame() {
       let consumed = false;
       for (let attempt = 1; attempt <= CONSUME_MAX_RETRIES; attempt++) {
         try {
+          // Diagnostic: dump local note store before consume attempt
+          const allLocal = await client.getInputNotes(new NoteFilter(NoteFilterTypes.All));
+          const committedLocal = await client.getInputNotes(new NoteFilter(NoteFilterTypes.Committed));
+          log(`[diag] Before consume — ALL notes: ${allLocal.length}, COMMITTED: ${committedLocal.length}`);
+          allLocal.forEach((n: { id: () => { toString: () => string }; isConsumed: () => boolean; isProcessing: () => boolean; isAuthenticated: () => boolean }, i: number) => {
+            log(`[diag]   [${i}] id=${n.id().toString()}, consumed=${n.isConsumed()}, processing=${n.isProcessing()}, auth=${n.isAuthenticated()}`);
+          });
+          const match = allLocal.find((n: { id: () => { toString: () => string } }) => n.id().toString() === noteId);
+          log(`[diag] Looking for ${noteId} — found? ${match ? "YES" : "NO"}`);
+
           log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Consuming note ${noteId}...`);
           const result = await consume({ accountId: gameAccountAddress, notes: [noteId] });
           log(`Consume succeeded for ${noteId}: ${JSON.stringify(result)}`);

@@ -62,8 +62,7 @@ describe("useGameState", () => {
     expect(result.current.isLoading).toBe(false);
   });
 
-  it("imports the account after a short delay", async () => {
-    vi.useFakeTimers();
+  it("imports the account on mount", () => {
     const mockImport = vi.fn(async () => ({}) as AnyAccount);
     vi.mocked(useImportAccount).mockReturnValue({
       importAccount: mockImport,
@@ -74,13 +73,9 @@ describe("useGameState", () => {
     });
 
     renderHook(() => useGameState("mtst1test"));
-    expect(mockImport).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(600);
     expect(mockImport).toHaveBeenCalledWith({
       type: "id",
       accountId: "mtst1test",
     });
-    vi.useRealTimers();
   });
 });
