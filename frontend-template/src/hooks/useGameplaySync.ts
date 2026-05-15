@@ -42,7 +42,9 @@ export function useGameplaySync(
   enabled: boolean,
 ) {
   const client = useMidenClient();
-  const { runExclusive } = useMiden();
+  const { runExclusive, prover } = useMiden();
+  const proverRef = useRef(prover);
+  proverRef.current = prover;
   const { notes: allNotes } = useNotes(
     myAccountId ? { accountId: myAccountId } : undefined,
   );
@@ -197,10 +199,14 @@ export function useGameplaySync(
             if (txRequest === "skip") {
               handledNoteIds.add(noteId);
             } else {
-              // Shot-note: custom TX via raw client
+              // Shot-note: custom TX via raw client, using remote prover if available
               const accountIdObj = AccountId.fromBech32(myAccountId);
               log(`Consuming shot-note ${noteId}...`);
-              await client.submitNewTransaction(accountIdObj, txRequest);
+              if (proverRef.current) {
+                await client.submitNewTransactionWithProver(accountIdObj, txRequest, proverRef.current);
+              } else {
+                await client.submitNewTransaction(accountIdObj, txRequest);
+              }
               handledNoteIds.add(noteId);
               log(`Shot-note ${noteId} consumed`);
             }
