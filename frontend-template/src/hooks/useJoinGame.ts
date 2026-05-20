@@ -297,14 +297,6 @@ export function useJoinGame() {
       return;
     }
 
-    // Suppress poll syncs immediately to prevent sync_height race (web-sdk#148)
-    pollSuppressedRef.current = true;
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-      log("Stopped poll loop for consume flow.");
-    }
-
     const noteIds = pendingNotes.map((n) => n.id().toString());
     log(`=== CONSUMING ${noteIds.length} NOTE(S) SEQUENTIALLY ===`);
     noteIds.forEach((id, i) => log(`  [${i}] ${id}`));
