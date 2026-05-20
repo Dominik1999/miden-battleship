@@ -10,6 +10,7 @@ interface GameBoardProps {
   board: Board;
   label: string;
   interactive?: boolean;
+  pendingShots?: Set<string>;
   onCellClick?: (row: number, col: number) => void;
 }
 
@@ -17,6 +18,7 @@ export function GameBoard({
   board,
   label,
   interactive = false,
+  pendingShots,
   onCellClick,
 }: GameBoardProps) {
   return (
@@ -40,12 +42,14 @@ export function GameBoard({
             {row.map((cell) => {
               const alreadyShot =
                 cell.state === CELL_HIT || cell.state === CELL_MISS;
-              const cellInteractive = interactive && !alreadyShot;
+              const isPending = pendingShots?.has(`${cell.row},${cell.col}`) ?? false;
+              const cellInteractive = interactive && !alreadyShot && !isPending;
               return (
                 <Cell
                   key={`${cell.row}-${cell.col}`}
                   state={cell.state}
                   interactive={cellInteractive}
+                  pending={isPending}
                   onClick={
                     cellInteractive
                       ? () => onCellClick?.(cell.row, cell.col)

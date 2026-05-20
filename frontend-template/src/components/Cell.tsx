@@ -5,12 +5,15 @@ import "./Cell.css";
 interface CellProps {
   state: CellState;
   interactive: boolean;
+  pending?: boolean;
   onClick?: () => void;
 }
 
-function cellClassName(state: CellState, interactive: boolean): string {
+function cellClassName(state: CellState, interactive: boolean, pending: boolean): string {
   const classes = ["cell"];
-  if (state === CELL_WATER) classes.push("cell-water");
+  if (pending) {
+    classes.push("cell-pending");
+  } else if (state === CELL_WATER) classes.push("cell-water");
   else if (state === CELL_HIT) classes.push("cell-hit");
   else if (state === CELL_MISS) classes.push("cell-miss");
   else if (state >= 1 && state <= 5) classes.push("cell-ship");
@@ -18,13 +21,13 @@ function cellClassName(state: CellState, interactive: boolean): string {
   return classes.join(" ");
 }
 
-export function Cell({ state, interactive, onClick }: CellProps) {
+export function Cell({ state, interactive, pending = false, onClick }: CellProps) {
   return (
     <button
-      className={cellClassName(state, interactive)}
+      className={cellClassName(state, interactive, pending)}
       onClick={interactive ? onClick : undefined}
       disabled={!interactive}
-      aria-label={`Cell ${state === CELL_HIT ? "hit" : state === CELL_MISS ? "miss" : state >= 1 && state <= 5 ? "ship" : "water"}`}
+      aria-label={`Cell ${pending ? "pending" : state === CELL_HIT ? "hit" : state === CELL_MISS ? "miss" : state >= 1 && state <= 5 ? "ship" : "water"}`}
     />
   );
 }

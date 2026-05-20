@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlayerRole } from "@/types/game";
 import { PHASE_ACTIVE } from "@/types/game";
 import { TOTAL_SHIP_CELLS } from "@/config";
@@ -140,19 +140,37 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
     return 2 * myState.totalShotsReceived;
   })();
 
-  // Reset hasFiredRef when a shot fails (NOT_GRANTED, timeout, etc.)
-  // so the player can retry instead of being stuck on "Opponent's turn..."
+  // Optimistic UI: track pending shots (shown as pulsing markers on enemy board)
+  const [pendingShots, setPendingShots] = useState<Set<string>>(new Set());
+
+  // Reset hasFiredRef and clear pending shots when a shot fails
   useEffect(() => {
     if (error) {
       hasFiredRef.current = false;
+      setPendingShots(new Set());
     }
   }, [error]);
+
+  // Clear pending shots when they're confirmed (opponent board updates with hit/miss)
+  // This happens when the gameplay sync processes the result and refetchAccount updates the board
+  const prevTotalShotsRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!myState) return;
+    const currentShots = myState.totalShotsReceived;
+    if (prevTotalShotsRef.current !== null && currentShots !== prevTotalShotsRef.current) {
+      // State changed — clear pending shots (they'll now show as hit/miss from the board data)
+      setPendingShots(new Set());
+    }
+    prevTotalShotsRef.current = currentShots;
+  }, [myState]);
 
   const handleCellClick = useCallback(
     (row: number, col: number) => {
       if (!isMyTurn || busy || !myState) return;
       playShot();
       hasFiredRef.current = true;
+      // Optimistic: show pending marker immediately
+      setPendingShots((prev) => new Set(prev).add(`${row},${col}`));
       fireShot(row, col, shotTurnNumber);
     },
     [isMyTurn, busy, myState, shotTurnNumber, fireShot, playShot],
@@ -178,6 +196,7 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
           board={opponentBoard}
           label="Enemy Waters"
           interactive={isMyTurn && !busy && !gameOver}
+          pendingShots={pendingShots}
           onCellClick={handleCellClick}
         />
       </div>

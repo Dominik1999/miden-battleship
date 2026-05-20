@@ -40,6 +40,16 @@
   opacity: 0.7;
 }
 
+.cell-pending {
+  background-color: #f80;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 0.6; }
+  50% { opacity: 1; }
+}
+
 .cell-interactive {
   cursor: crosshair;
 }
