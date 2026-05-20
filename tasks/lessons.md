@@ -97,3 +97,33 @@
 **Status:** Known SDK bug. Filed as 0xMiden/web-sdk#139 with full repro steps. Also related to web-sdk#138 (merged but possibly not fully fixed in 0.14.5). This is the sole remaining blocker for end-to-end gameplay.
 
 **Verified 2026-05-09:** After the packed board optimization (720K→169K cycles), the handshake completes without prover timeouts. But gameplay still breaks on the first shot due to this borrow_fail bug. A full game cannot complete until this SDK bug is fixed.
+
+## Always Verify Reproduction Cases Before Presenting Them
+
+**Date:** 2026-05-20
+
+**Problem:** Created and published a standalone repro repo (miden-sync-repro) for web-sdk#148 without actually running it to confirm it reproduces the bug. The repro was invalid — it didn't include the periodic poll sync loop that causes the race condition, so it would have succeeded every time. This wasted time and credibility.
+
+**Root Cause:** Rushed to create the repro based on an incorrect hypothesis (SDK sync bug) without verifying the hypothesis first. The real bug was an app-level sync race between polling sync and consume-flow sync. A repro without the polling loop can't reproduce the race.
+
+**Compounding mistake:** Also misattributed the bug to the pagination logic in miden-client (sync_notes_with_details early termination), filed a PR (#2180) based on this wrong hypothesis, and closed it when told #2170 superseded it — but #2170 didn't fix our bug either.
+
+**Rule:** Before presenting any reproduction case, bug report, or fix:
+1. **Run the repro** and confirm it actually fails
+2. **Verify the hypothesis** — does the proposed root cause explain ALL observations?
+3. **Check your fix** — does disabling the fix re-introduce the bug?
+4. If you can't run the repro (e.g., needs testnet), say so explicitly instead of presenting unverified work as confirmed
+
+**Key insight:** An unverified repro is worse than no repro — it sends investigators down the wrong path. Time spent verifying is always less than time wasted on wrong hypotheses.
+
+## Poll Sync Race: sync_height Advances Past Wallet-Submitted Notes
+
+**Date:** 2026-05-20
+
+**Problem:** ~50% of handshake attempts failed with "Some notes could not be found for provided IDs" — the setup note submitted via wallet adapter was never discovered by the local client's syncState().
+
+**Root Cause:** App-level sync race, NOT an SDK bug. The periodic poll sync loop (checking for opponent) could fire between wallet adapter note submission and the explicit consume sync. If the poll sync runs before the note's block is committed, it advances sync_height past that block. Since sync only moves forward (block_from = sync_height + 1), the note is permanently invisible.
+
+**Fix:** Added `pollSuppressedRef` guard that immediately prevents in-flight poll sync() calls from completing when entering the consume flow. Set the guard BEFORE clearing the interval, since clearInterval can't cancel an already-running async sync.
+
+**Key insight:** `sync_height` is a one-way ratchet — it never goes backward. Any sync() call that advances it past a not-yet-committed note permanently hides that note. When submitting notes via wallet adapter and waiting for them to appear, ALL other sync sources must be suppressed.
