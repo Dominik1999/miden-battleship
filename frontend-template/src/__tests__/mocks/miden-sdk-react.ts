@@ -183,7 +183,16 @@ export const useMiden = vi.fn(() => ({
   signerAccountId: null,
 }));
 
-export const useMidenClient = vi.fn(() => ({}));
+export const useMidenClient = vi.fn(() => ({
+  submitNewTransaction: vi.fn(async () => ({ toHex: () => "0x1234" })),
+  submitNewTransactionWithProver: vi.fn(async () => ({ toHex: () => "0x1234" })),
+  syncState: vi.fn(async () => {}),
+  getInputNotes: vi.fn(async () => []),
+  getInputNote: vi.fn(async () => null),
+  newConsumeTransactionRequest: vi.fn(() => ({})),
+  addTag: vi.fn(async () => {}),
+  newAccount: vi.fn(async () => {}),
+}));
 
 export const useSigner = vi.fn(() => null);
 

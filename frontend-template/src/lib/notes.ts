@@ -94,7 +94,33 @@ export function buildHandshakeInputs(
   return arr;
 }
 
-/** Build, sign, and submit a note via the wallet adapter */
+/** Build a note targeting the given account */
+export function buildNote(
+  pkg: Package,
+  inputs: FeltArray,
+  targetAccount: AccountId,
+  senderId: AccountId,
+  senderAddress: string,
+): { note: Note; noteId: string; tag: number } {
+  const noteScript = NoteScript.fromPackage(pkg);
+  const noteStorage = new NoteStorage(inputs);
+  const serialNum = randomWord();
+  const recipient = new NoteRecipient(serialNum, noteScript, noteStorage);
+
+  const noteTag = NoteTag.withAccountTarget(targetAccount);
+  const metadata = new NoteMetadata(
+    senderId,
+    NoteType.Public,
+    noteTag,
+  );
+
+  const note = new Note(new NoteAssets(), metadata, recipient);
+  const noteId = note.id().toString();
+  log(`Built note — ID: ${noteId}, tag: ${noteTag.asU32()}, sender: ${senderAddress}`);
+  return { note, noteId, tag: noteTag.asU32() };
+}
+
+/** Build, sign, and submit a note via the wallet adapter (legacy — requires wallet popup) */
 export async function submitNote(
   pkg: Package,
   inputs: FeltArray,
@@ -137,6 +163,31 @@ export async function submitNote(
   await requestTransaction(tx);
   log(`${noteTypeName} note ${note.id().toString()} submitted successfully`);
   return note.id().toString();
+}
+
+/**
+ * Submit note(s) directly from a no-auth game account — no wallet popup needed.
+ * The game account acts as the sender. Works for undeployed accounts because
+ * the first submitNewTransaction deploys them.
+ */
+export async function submitNoteDirect(
+  notes: Note[],
+  gameAccountId: AccountId,
+  client: { submitNewTransaction(accountId: AccountId, request: unknown): Promise<unknown> },
+  prover?: unknown,
+): Promise<void> {
+  const txRequest = new TransactionRequestBuilder()
+    .withOwnOutputNotes(new NoteArray(notes))
+    .build();
+
+  log(`Submitting ${notes.length} note(s) directly from game account (no wallet popup)...`);
+  if (prover) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (client as any).submitNewTransactionWithProver(gameAccountId, txRequest, prover);
+  } else {
+    await client.submitNewTransaction(gameAccountId, txRequest);
+  }
+  log(`${notes.length} note(s) submitted successfully`);
 }
 
 /**

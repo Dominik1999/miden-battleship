@@ -133,18 +133,4 @@ describe("GamePlay", () => {
     expect(screen.getByText("Loading boards...")).toBeInTheDocument();
   });
 
-  it("shows wallet connection warning when disconnected", () => {
-    mockUseMidenFiWallet.mockReturnValue({
-      address: null as unknown as string,
-      connected: false,
-      requestTransaction: vi.fn(),
-    });
-
-    render(
-      <GamePlay accountA="mtst1a" accountB="mtst1b" playerRole="challenger" />,
-    );
-    expect(
-      screen.getByText("Connect your wallet to fire shots"),
-    ).toBeInTheDocument();
-  });
 });

@@ -16,7 +16,8 @@ import {
   createGameAccount,
   buildSetupInputs,
   buildHandshakeInputs,
-  submitNote,
+  buildNote,
+  submitNoteDirect,
 } from "@/lib/notes";
 import {
   SLOT_OPPONENT,
@@ -310,19 +311,20 @@ export function useStartGame() {
       const walletId = AccountId.fromBech32(walletAddress);
       const gameAccountId = AccountId.fromBech32(gameAccountAddress);
 
-      // Step 2: Submit our own setup note using the JOINER's game_id (must match for accept_challenge)
-      log("Submitting starter setup note → own game account...");
-      const setupNoteId = await submitNote(
+      // Step 2: Submit our own setup note directly from the game account (no wallet popup).
+      log("Building starter setup note...");
+      const { note: setupNote, noteId: setupNoteId } = buildNote(
         setupPkg,
         buildSetupInputs(challengeGameId, joinerPrefix, joinerSuffix, commitment, cells),
         gameAccountId,
+        gameAccountId,
         gameAccountAddress,
-        1,
-        walletAddress,
-        walletId,
-        requestTransaction as (tx: unknown) => Promise<unknown>,
       );
       log(`Setup note ID: ${setupNoteId}`);
+      log("Submitting setup note directly (no wallet popup)...");
+      await runExclusive(() =>
+        submitNoteDirect([setupNote], gameAccountId, client),
+      );
 
       // Step 3: Wait for setup note to appear on-chain, then consume it ALONE
       // Retry loop: sync + consume, because the note may not be on-chain yet
@@ -381,20 +383,21 @@ export function useStartGame() {
         }
       }
 
-      // Step 5: Send accept note to joiner
-      log("Submitting accept note → joiner account...");
+      // Step 5: Send accept note to joiner directly (no wallet popup)
+      log("Building accept note → joiner account...");
       const joinerHex = accountIdHexFromU64s(joinerPrefix.asInt(), joinerSuffix.asInt());
       const joinerId = AccountId.fromHex(joinerHex);
       const joinerAddr = Address.fromAccountId(joinerId).toBech32(NetworkId.testnet());
-      await submitNote(
+      const { note: acceptNote } = buildNote(
         acceptPkg,
         buildHandshakeInputs(challengeGameId, gameAccountId.prefix(), gameAccountId.suffix(), commitment),
         joinerId,
-        joinerAddr,
-        4,
-        walletAddress,
-        walletId,
-        requestTransaction as (tx: unknown) => Promise<unknown>,
+        gameAccountId,
+        gameAccountAddress,
+      );
+      log("Submitting accept note directly (no wallet popup)...");
+      await runExclusive(() =>
+        submitNoteDirect([acceptNote], gameAccountId, client),
       );
 
       log("=== GAME READY ===");

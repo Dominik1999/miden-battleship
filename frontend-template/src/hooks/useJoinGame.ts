@@ -16,7 +16,8 @@ import {
   createGameAccount,
   buildSetupInputs,
   buildHandshakeInputs,
-  submitNote,
+  buildNote,
+  submitNoteDirect,
 } from "@/lib/notes";
 import {
   SLOT_GAME_CONFIG,
@@ -145,11 +146,12 @@ export function useJoinGame() {
         const gameIdFelts = gameId.toFelts();
         const commitFelts = commitment.toFelts();
 
-        // Submit setup note (opponent = starter) — wallet is sender (has proper auth)
-        // Save the note ID so consumeNotes() can consume it first (before accept note)
+        // Build setup + challenge notes and submit directly from the game account.
+        // No wallet popup needed — game accounts are no-auth and notes carry no assets.
         setStage("setting-up");
-        log("Submitting setup note (tag=2) → joiner game account...");
-        const setupNoteId = await submitNote(
+        log("Building setup + challenge notes...");
+
+        const { note: setupNote, noteId: setupNoteId } = buildNote(
           setupPkg,
           buildSetupInputs(
             gameIdFelts,
@@ -159,20 +161,13 @@ export function useJoinGame() {
             cells,
           ),
           joinerAccountId,
+          joinerAccountId,
           accountAddress,
-          2,
-          walletAddress,
-          walletId,
-          requestTransaction as (tx: unknown) => Promise<unknown>,
         );
-
         setupNoteIdRef.current = setupNoteId;
-        log(`Setup note ID saved: ${setupNoteId}`);
+        log(`Setup note ID: ${setupNoteId}`);
 
-        // Submit challenge note (targeting starter) — wallet is sender
-        setStage("challenging");
-        log("Submitting challenge note (tag=3) → starter game account...");
-        await submitNote(
+        const { note: challengeNote } = buildNote(
           challengePkg,
           buildHandshakeInputs(
             gameIdFelts,
@@ -181,11 +176,14 @@ export function useJoinGame() {
             commitFelts,
           ),
           starterAccountId,
-          starterAddr,
-          3,
-          walletAddress,
-          walletId,
-          requestTransaction as (tx: unknown) => Promise<unknown>,
+          joinerAccountId,
+          accountAddress,
+        );
+
+        setStage("challenging");
+        log("Submitting setup + challenge notes directly (no wallet popup)...");
+        await runExclusive(() =>
+          submitNoteDirect([setupNote, challengeNote], joinerAccountId, client),
         );
 
         // Wait for initial sync

@@ -31,7 +31,7 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
   const { board: opponentBoard } = useBoardState(opponentAccount, true);
 
   const { fireShot, isSubmitting, isWaiting, error, walletConnected } =
-    useFireShot(opponentAccount, refetchOpponent);
+    useFireShot(myAccount, opponentAccount, refetchOpponent);
 
   const busy = isSubmitting || isWaiting;
 
@@ -181,10 +181,6 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
           onCellClick={handleCellClick}
         />
       </div>
-
-      {!walletConnected && (
-        <p className="warning">Connect your wallet to fire shots</p>
-      )}
 
       {error && <p className="error">{error}</p>}
 

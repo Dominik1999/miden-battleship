@@ -3,20 +3,6 @@ import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 
 vi.mock("@miden-sdk/react", () => import("@/__tests__/mocks/miden-sdk-react"));
 
-const mockRequestTransaction = vi.fn(async () => ({}));
-const mockUseMidenFiWallet = vi.fn(() => ({
-  address: "mtst1wallet",
-  connected: true,
-  requestTransaction: mockRequestTransaction,
-}));
-
-vi.mock("@miden-sdk/miden-wallet-adapter", () => ({
-  useMidenFiWallet: () => mockUseMidenFiWallet(),
-  Transaction: {
-    createCustomTransaction: vi.fn(() => ({})),
-  },
-}));
-
 vi.mock("@miden-sdk/miden-sdk", () => {
   class MockFelt { value: bigint; constructor(v: bigint) { this.value = v; } }
   class Stub {}
@@ -33,10 +19,6 @@ vi.mock("@miden-sdk/miden-sdk", () => {
       withAccountTarget: vi.fn(() => ({ asU32: vi.fn(() => 42) })),
     },
     NoteType: { Public: 0 },
-    NoteAttachment: {
-      newNetworkAccountTarget: vi.fn(() => ({})),
-    },
-    NoteExecutionHint: { always: vi.fn(() => ({})) },
     NoteArray: Stub,
     TransactionRequestBuilder: MockTRB,
     AccountId: {
@@ -67,17 +49,11 @@ globalThis.fetch = vi.fn(() =>
 ) as unknown as typeof fetch;
 
 import { useFireShot } from "../useFireShot";
-import { NoteAttachment } from "@miden-sdk/miden-sdk";
 
 describe("useFireShot", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     vi.useFakeTimers();
-    mockUseMidenFiWallet.mockReturnValue({
-      address: "mtst1wallet",
-      connected: true,
-      requestTransaction: mockRequestTransaction,
-    });
   });
 
   afterEach(() => {
@@ -87,7 +63,7 @@ describe("useFireShot", () => {
   it("returns initial state", () => {
     const refetch = vi.fn();
     const { result } = renderHook(() =>
-      useFireShot("mtst1defender", refetch),
+      useFireShot("mtst1myaccount", "mtst1defender", refetch),
     );
 
     expect(result.current.isSubmitting).toBe(false);
@@ -97,69 +73,41 @@ describe("useFireShot", () => {
     expect(typeof result.current.fireShot).toBe("function");
   });
 
-  it("reports wallet not connected", () => {
-    mockUseMidenFiWallet.mockReturnValue({
-      address: null as unknown as string,
-      connected: false,
-      requestTransaction: vi.fn(),
-    });
-
+  it("reports not connected when no game account", () => {
     const refetch = vi.fn();
     const { result } = renderHook(() =>
-      useFireShot("mtst1defender", refetch),
+      useFireShot("", "mtst1defender", refetch),
     );
 
     expect(result.current.walletConnected).toBe(false);
   });
 
-  it("does NOT use NoteAttachment.newNetworkAccountTarget (game accounts are regular, not network)", async () => {
-    const refetch = vi.fn();
-    const { result } = renderHook(() =>
-      useFireShot("mtst1defender", refetch),
-    );
-
-    await act(async () => {
-      const promise = result.current.fireShot(3, 5, 1);
-      await vi.advanceTimersByTimeAsync(15_000);
-      await promise;
-    });
-
-    // Game accounts are RegularAccountImmutableCode, not network accounts.
-    // Using NoteAttachment.newNetworkAccountTarget would throw at runtime.
-    expect(NoteAttachment.newNetworkAccountTarget).not.toHaveBeenCalled();
-  });
-
   it("completes fireShot without error", async () => {
     const refetch = vi.fn();
     const { result } = renderHook(() =>
-      useFireShot("mtst1defender", refetch),
+      useFireShot("mtst1myaccount", "mtst1defender", refetch),
     );
 
     await act(async () => {
       const promise = result.current.fireShot(2, 7, 3);
-      await vi.advanceTimersByTimeAsync(15_000);
+      await vi.advanceTimersByTimeAsync(10_000);
       await promise;
     });
 
     expect(result.current.error).toBeNull();
   });
 
-  it("does not fire when wallet is not connected", async () => {
-    mockUseMidenFiWallet.mockReturnValue({
-      address: null as unknown as string,
-      connected: false,
-      requestTransaction: null as unknown as typeof mockRequestTransaction,
-    });
-
+  it("does not fire when game account is empty", async () => {
     const refetch = vi.fn();
     const { result } = renderHook(() =>
-      useFireShot("mtst1defender", refetch),
+      useFireShot("", "mtst1defender", refetch),
     );
 
     await act(async () => {
       await result.current.fireShot(0, 0, 1);
     });
 
-    expect(mockRequestTransaction).not.toHaveBeenCalled();
+    // Should return early without submitting
+    expect(result.current.isSubmitting).toBe(false);
   });
 });
