@@ -238,14 +238,23 @@ export function useStartGame() {
     }
   }, [stage, allNotes, consumableNotes]);
 
-  // Get NEW non-consumed, authenticated notes (exclude pre-game notes)
+  // Get NEW non-consumed, authenticated notes (exclude pre-game, already-consumed,
+  // and non-game notes like P2ID token transfers that target the wallet, not the game account).
   const pendingNotes = (allNotes ?? []).filter(
-    (n) =>
-      !n.isConsumed() &&
-      !n.isProcessing() &&
-      n.isAuthenticated() &&
-      !preGameNoteIds.current.has(n.id().toString()) &&
-      !consumedNoteIds.current.has(n.id().toString()),
+    (n) => {
+      if (n.isConsumed() || n.isProcessing() || !n.isAuthenticated()) return false;
+      if (preGameNoteIds.current.has(n.id().toString())) return false;
+      if (consumedNoteIds.current.has(n.id().toString())) return false;
+      // Filter by note input count: game notes have 10 (challenge/accept) inputs.
+      // P2ID notes and other non-game notes have different counts and would fail with
+      // "P2ID's target account address and transaction address do not match".
+      try {
+        const inputCount = n.details().recipient().storage().items().length;
+        return inputCount === 10;
+      } catch {
+        return false;
+      }
+    },
   );
 
   // Starter's consume flow (two separate transactions for phase transitions):
