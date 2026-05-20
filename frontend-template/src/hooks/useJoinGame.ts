@@ -217,19 +217,24 @@ export function useJoinGame() {
   // Poll for game becoming active (starter sent accept)
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollCountRef = useRef(0);
+  const pollSuppressedRef = useRef(false);
 
   useEffect(() => {
     if (stage !== "waiting" || !gameAccountAddress) return;
 
     pollCountRef.current = 0;
+    pollSuppressedRef.current = false;
     log(`Starting poll loop (every ${AUTO_SYNC_INTERVAL_MS / 1000}s) for game account: ${gameAccountAddress}`);
 
     pollRef.current = setInterval(async () => {
+      if (pollSuppressedRef.current) return;
       pollCountRef.current++;
       const tick = pollCountRef.current;
       try {
         log(`[poll #${tick}] Syncing from network...`);
+        if (pollSuppressedRef.current) return;
         await sync();
+        if (pollSuppressedRef.current) return;
         log(`[poll #${tick}] Sync complete. Refetching account + notes...`);
         refetchGame();
         refetchNotes();
@@ -281,6 +286,14 @@ export function useJoinGame() {
     if (!gameAccountAddress || pendingNotes.length === 0) {
       log("consumeNotes called but nothing to consume");
       return;
+    }
+
+    // Suppress poll syncs immediately to prevent sync_height race (web-sdk#148)
+    pollSuppressedRef.current = true;
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+      log("Stopped poll loop for consume flow.");
     }
 
     const noteIds = pendingNotes.map((n) => n.id().toString());

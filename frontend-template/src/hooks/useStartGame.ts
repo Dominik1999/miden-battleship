@@ -183,19 +183,27 @@ export function useStartGame() {
   // Poll for opponent joining
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pollCountRef = useRef(0);
+  // Guard: when true, poll syncs are suppressed even if a tick is already in flight.
+  // This prevents an in-flight sync() from advancing sync_height past the block
+  // where a wallet-adapter-submitted note lands (root cause of web-sdk#148).
+  const pollSuppressedRef = useRef(false);
 
   useEffect(() => {
     if (stage !== "waiting-for-opponent" || !gameAccountAddress) return;
 
     pollCountRef.current = 0;
+    pollSuppressedRef.current = false;
     log(`Starting poll loop (every ${AUTO_SYNC_INTERVAL_MS / 1000}s) for game account: ${gameAccountAddress}`);
 
     pollRef.current = setInterval(async () => {
+      if (pollSuppressedRef.current) return;
       pollCountRef.current++;
       const tick = pollCountRef.current;
       try {
         log(`[poll #${tick}] Syncing from network...`);
+        if (pollSuppressedRef.current) return; // check again before async sync
         await sync();
+        if (pollSuppressedRef.current) return; // don't refetch if suppressed
         log(`[poll #${tick}] Sync complete. Refetching account + notes...`);
         refetchGame();
         refetchNotes();
@@ -262,6 +270,11 @@ export function useStartGame() {
       return;
     }
     consumingRef.current = true;
+
+    // Suppress poll syncs immediately — an in-flight sync() could advance
+    // sync_height past the block where our setup note lands, making it
+    // permanently invisible to subsequent syncs (web-sdk#148 race).
+    pollSuppressedRef.current = true;
 
     // Switch stage to prevent opponent detection effect from firing during consume
     setStage("completing");
