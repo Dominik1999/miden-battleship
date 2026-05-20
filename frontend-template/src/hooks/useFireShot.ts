@@ -121,9 +121,9 @@ export function useFireShot(
         log("Shot submitted successfully");
         setIsSubmitting(false);
 
-        // Wait for network to process the shot, then re-sync.
-        // Keep isWaiting=true until sync completes so useGameplaySync
-        // stays disabled and doesn't race with this sync call.
+        // Brief delay then sync to update local state after submission.
+        // The opponent's gameplay sync (polling every 3s) will discover the
+        // shot note independently — this sync is just for the shooter's UI.
         setIsWaiting(true);
         log(`Waiting ${NETWORK_SYNC_DELAY_MS / 1000}s for network...`);
         await new Promise((r) => setTimeout(r, NETWORK_SYNC_DELAY_MS));

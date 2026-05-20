@@ -33,10 +33,12 @@ export const GRID_SIZE = 10;
 export const TOTAL_SHIP_CELLS = 17;
 
 // Network timing
-export const NETWORK_SYNC_DELAY_MS = 10_000;
-export const AUTO_SYNC_INTERVAL_MS = 8_000;
+export const NETWORK_SYNC_DELAY_MS = 3_000; // Initial delay before first sync after submission
+export const NETWORK_POLL_INTERVAL_MS = 3_000; // Interval between poll-until-confirmed retries
+export const NETWORK_POLL_MAX_ATTEMPTS = 15; // Max poll attempts (45s total)
+export const AUTO_SYNC_INTERVAL_MS = 3_000; // Gameplay sync polling interval
 export const CONSUME_MAX_RETRIES = 10;
-export const CONSUME_RETRY_DELAY_MS = 10_000;
+export const CONSUME_RETRY_DELAY_MS = 5_000;
 
 // Block explorer base URL
 export const EXPLORER_BASE_URL = "https://testnet.midenscan.com";
