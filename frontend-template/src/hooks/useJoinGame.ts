@@ -132,7 +132,6 @@ export function useJoinGame() {
         // importAccount({ type: "id" }) would fail because the account isn't
         // on-chain yet — it only gets deployed on first transaction (consume).
 
-        const walletId = AccountId.fromBech32(walletAddress);
         const joinerAccountId = AccountId.fromBech32(accountAddress);
         const starterAccountId = AccountId.fromBech32(starterAddr);
 

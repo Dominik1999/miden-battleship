@@ -308,7 +308,6 @@ export function useStartGame() {
       log(`Challenge note (${challengeNoteId}) gameId=[${challengeGameId.map(String)}], joiner prefix=${joinerPrefix}, suffix=${joinerSuffix}`);
 
       const { cells, commitment, setupPkg, acceptPkg } = deferredRef.current;
-      const walletId = AccountId.fromBech32(walletAddress);
       const gameAccountId = AccountId.fromBech32(gameAccountAddress);
 
       // Step 2: Submit our own setup note directly from the game account (no wallet popup).

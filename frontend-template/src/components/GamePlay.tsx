@@ -30,7 +30,7 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
     useGameState(opponentAccount, true);
   const { board: opponentBoard } = useBoardState(opponentAccount, true);
 
-  const { fireShot, isSubmitting, isWaiting, error, walletConnected } =
+  const { fireShot, isSubmitting, isWaiting, error } =
     useFireShot(myAccount, opponentAccount, refetchOpponent);
 
   const busy = isSubmitting || isWaiting;
