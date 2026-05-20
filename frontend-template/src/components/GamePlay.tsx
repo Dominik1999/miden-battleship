@@ -137,6 +137,14 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
     return 2 * myState.totalShotsReceived;
   })();
 
+  // Reset hasFiredRef when a shot fails (NOT_GRANTED, timeout, etc.)
+  // so the player can retry instead of being stuck on "Opponent's turn..."
+  useEffect(() => {
+    if (error) {
+      hasFiredRef.current = false;
+    }
+  }, [error]);
+
   const handleCellClick = useCallback(
     (row: number, col: number) => {
       if (!isMyTurn || busy || !myState) return;
