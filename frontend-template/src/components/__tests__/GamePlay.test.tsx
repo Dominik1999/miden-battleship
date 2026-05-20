@@ -77,22 +77,10 @@ vi.mock("@/hooks/useGameplaySync", () => ({
 import { useAccount } from "@miden-sdk/react";
 import { createMockGameAccount } from "@/__tests__/fixtures/battleship";
 import { GamePlay } from "../GamePlay";
-import { CELL_WATER } from "@/types/game";
+
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyAccount = any;
-
-function makeEmptyBoard() {
-  const grid = [];
-  for (let row = 0; row < 10; row++) {
-    const rowCells = [];
-    for (let col = 0; col < 10; col++) {
-      rowCells.push({ row, col, state: CELL_WATER });
-    }
-    grid.push(rowCells);
-  }
-  return grid;
-}
 
 describe("GamePlay", () => {
   beforeEach(() => {
