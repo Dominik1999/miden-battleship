@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useState } from "react";
 import { useMidenClient, useMiden, useNotes, useAccount } from "@miden-sdk/react";
 import {
   TransactionRequestBuilder,
@@ -52,6 +52,11 @@ export function useGameplaySync(
   const refetchRef = useRef(refetchAccount);
   refetchRef.current = refetchAccount;
 
+  // Track whether the opponent's game is over (detected from result notes).
+  // When a result note contains gameOver=1, it means WE fired the winning shot.
+  // We don't consume the result note — just read the flag from its inputs.
+  const [opponentGameOver, setOpponentGameOver] = useState(false);
+
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const busyRef = useRef(false);
   const tickRef = useRef<() => Promise<void>>(async () => {});
@@ -99,13 +104,16 @@ export function useGameplaySync(
       log(`Note ${noteIdStr}: ${noteInputs.length} inputs`);
 
       if (noteInputs.length === 4) {
-        // Result-note: skip — these target the shooter's wallet, not the
-        // defender's game account. The defender already knows hit/miss from
-        // the board state updated during shot consumption. Consuming a
-        // result note meant for another account causes nullifier conflicts
-        // and can crash the WASM prover (capacity overflow panic).
+        // Result-note: don't consume — these target the shooter's wallet, not
+        // the defender's game account. Consuming causes nullifier conflicts.
+        // But DO read the gameOver flag: if gameOver=1, WE fired the winning shot.
         const encodedResult = noteInputs[3].asInt();
-        log(`Result note (skipping — targets shooter): result=${encodedResult / 2n === 1n ? "HIT" : "MISS"}, gameOver=${encodedResult % 2n}`);
+        const isGameOver = encodedResult % 2n === 1n;
+        log(`Result note (skipping): result=${encodedResult / 2n === 1n ? "HIT" : "MISS"}, gameOver=${isGameOver}`);
+        if (isGameOver) {
+          log("*** GAME OVER detected from result note — we won! ***");
+          setOpponentGameOver(true);
+        }
         return "skip" as const;
       }
 
@@ -250,5 +258,5 @@ export function useGameplaySync(
     };
   }, [enabled, myAccountId]);
 
-  return {};
+  return { opponentGameOver };
 }

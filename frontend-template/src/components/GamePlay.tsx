@@ -36,9 +36,11 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
   const busy = isSubmitting || isWaiting;
 
   // Auto-sync and auto-consume incoming shot notes on our game account.
+  // opponentGameOver is set when a result note with gameOver=1 is detected
+  // (meaning WE fired the winning shot and the opponent's ships are all sunk).
   // Use a ref for gameOver to break the circular dependency (sync → state → gameOver → sync).
   const gameOverRef = useRef(false);
-  useGameplaySync(
+  const { opponentGameOver } = useGameplaySync(
     myAccount,
     !busy && !gameOverRef.current,
   );
@@ -88,10 +90,11 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
     return myState.totalShotsReceived > 0;
   })();
 
-  // We can only detect our own loss from myState. Win detection relies on
-  // opponentState (if available) or phase transition.
+  // Loss: detected from own state (shipsHitCount >= 17).
+  // Win: detected from result note gameOver flag (opponentGameOver) OR
+  //      from opponentState if available (fallback, usually null).
   const iLost = myState ? myState.shipsHitCount >= TOTAL_SHIP_CELLS : false;
-  const iWon = opponentState ? opponentState.shipsHitCount >= TOTAL_SHIP_CELLS : false;
+  const iWon = opponentGameOver || (opponentState ? opponentState.shipsHitCount >= TOTAL_SHIP_CELLS : false);
   const gameOver = iLost || iWon;
   gameOverRef.current = gameOver;
 
@@ -164,6 +167,7 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
       <GameStatus
         myState={myState}
         opponentState={opponentState}
+        opponentGameOver={opponentGameOver}
         isMyTurn={isMyTurn}
         isSyncing={isWaiting}
       />

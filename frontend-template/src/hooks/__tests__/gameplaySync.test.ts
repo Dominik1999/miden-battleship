@@ -35,6 +35,20 @@ function selectProver(
   return prover ? "remote" : "local";
 }
 
+// Simulate result note gameOver detection
+// Result note inputs: [shooter_prefix, shooter_suffix, turn, encodedResult]
+// encodedResult = result * 2 + gameOver
+// result: 0=miss, 1=hit. gameOver: 0=no, 1=yes.
+function detectGameOverFromResultNote(encodedResult: bigint): {
+  isHit: boolean;
+  isGameOver: boolean;
+} {
+  return {
+    isHit: encodedResult / 2n === 1n,
+    isGameOver: encodedResult % 2n === 1n,
+  };
+}
+
 describe("useGameplaySync", () => {
   describe("note classification", () => {
     it("classifies 14-input notes as shot notes", () => {
@@ -74,6 +88,32 @@ describe("useGameplaySync", () => {
 
     it("falls back to local prover when no remote prover", () => {
       expect(selectProver(null)).toBe("local");
+    });
+  });
+
+  describe("result note gameOver detection", () => {
+    it("encodedResult=0: miss, no gameOver", () => {
+      const r = detectGameOverFromResultNote(0n);
+      expect(r.isHit).toBe(false);
+      expect(r.isGameOver).toBe(false);
+    });
+
+    it("encodedResult=1: miss + gameOver (rare edge case)", () => {
+      const r = detectGameOverFromResultNote(1n);
+      expect(r.isHit).toBe(false);
+      expect(r.isGameOver).toBe(true);
+    });
+
+    it("encodedResult=2: hit, no gameOver", () => {
+      const r = detectGameOverFromResultNote(2n);
+      expect(r.isHit).toBe(true);
+      expect(r.isGameOver).toBe(false);
+    });
+
+    it("encodedResult=3: hit + gameOver (17th ship cell hit)", () => {
+      const r = detectGameOverFromResultNote(3n);
+      expect(r.isHit).toBe(true);
+      expect(r.isGameOver).toBe(true);
     });
   });
 });

@@ -6,6 +6,7 @@ import "./GameStatus.css";
 interface GameStatusProps {
   myState: GameState | null;
   opponentState: GameState | null;
+  opponentGameOver?: boolean;
   isMyTurn: boolean;
   isSyncing: boolean;
 }
@@ -13,6 +14,7 @@ interface GameStatusProps {
 export function GameStatus({
   myState,
   opponentState,
+  opponentGameOver = false,
   isMyTurn,
   isSyncing,
 }: GameStatusProps) {
@@ -26,9 +28,9 @@ export function GameStatus({
     : null;
 
   const iLost = myState.shipsHitCount >= TOTAL_SHIP_CELLS;
-  const iWon = opponentState
+  const iWon = opponentGameOver || (opponentState
     ? opponentState.shipsHitCount >= TOTAL_SHIP_CELLS
-    : false;
+    : false);
   const gameOver =
     myState.phase === PHASE_COMPLETE ||
     myState.phase === PHASE_REVEAL ||

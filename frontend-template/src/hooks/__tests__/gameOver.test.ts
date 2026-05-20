@@ -31,14 +31,21 @@ interface GameState {
   totalShotsReceived: number;
 }
 
+/**
+ * Simulates the game-over detection logic from GamePlay.tsx + GameStatus.tsx.
+ *
+ * Win detection now uses opponentGameOver flag from useGameplaySync, which
+ * reads the gameOver bit from result notes without consuming them.
+ */
 function detectGameOver(
   myState: GameState | null,
   opponentState: GameState | null,
+  opponentGameOver = false,
 ): { gameOver: boolean; iLost: boolean; iWon: boolean } {
   const iLost = myState ? myState.shipsHitCount >= TOTAL_SHIP_CELLS : false;
-  const iWon = opponentState
+  const iWon = opponentGameOver || (opponentState
     ? opponentState.shipsHitCount >= TOTAL_SHIP_CELLS
-    : false;
+    : false);
   const gameOver =
     (myState?.phase === PHASE_COMPLETE) ||
     (myState?.phase === PHASE_REVEAL) ||
@@ -72,21 +79,28 @@ describe("Game over detection", () => {
     });
   });
 
-  describe("Win detection (BROKEN — opponentState always null)", () => {
-    it("KNOWN BUG: cannot detect win when opponentState is null", () => {
-      // The winning player's opponent has 17 hits, but we can't see it
+  describe("Win detection (via opponentGameOver flag from result notes)", () => {
+    it("detects win from opponentGameOver flag even when opponentState is null", () => {
+      // The winning player's opponent has 17 hits. We detect this from the
+      // result note's gameOver bit, not from opponentState (which is null).
       const myState: GameState = { phase: PHASE_ACTIVE, shipsHitCount: 5, totalShotsReceived: 20 };
-      const result = detectGameOver(myState, null);
-      // This SHOULD be gameOver=true, iWon=true — but it's not
-      expect(result.gameOver).toBe(false);
-      expect(result.iWon).toBe(false);
-      // This test documents the bug. When fixed, change expects to true.
+      const result = detectGameOver(myState, null, true);
+      expect(result.gameOver).toBe(true);
+      expect(result.iWon).toBe(true);
+      expect(result.iLost).toBe(false);
     });
 
-    it("win detection works IF opponentState is available", () => {
+    it("does not trigger win when opponentGameOver is false", () => {
+      const myState: GameState = { phase: PHASE_ACTIVE, shipsHitCount: 5, totalShotsReceived: 10 };
+      const result = detectGameOver(myState, null, false);
+      expect(result.gameOver).toBe(false);
+      expect(result.iWon).toBe(false);
+    });
+
+    it("win detection also works via opponentState as fallback", () => {
       const myState: GameState = { phase: PHASE_ACTIVE, shipsHitCount: 5, totalShotsReceived: 20 };
       const opponentState: GameState = { phase: PHASE_ACTIVE, shipsHitCount: 17, totalShotsReceived: 17 };
-      const result = detectGameOver(myState, opponentState);
+      const result = detectGameOver(myState, opponentState, false);
       expect(result.gameOver).toBe(true);
       expect(result.iWon).toBe(true);
       expect(result.iLost).toBe(false);
