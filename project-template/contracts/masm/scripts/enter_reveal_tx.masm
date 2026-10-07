@@ -1,0 +1,31 @@
+use battleship::account as battleship
+
+# Enter-reveal transaction script: the winner runs it on its own game account to move the game
+# from ACTIVE to REVEAL.
+
+# TRANSACTION SCRIPT
+# =================================================================================================
+
+#! Moves the native account's game from ACTIVE to REVEAL.
+#!
+#! Inputs:  [TX_SCRIPT_ARGS, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - battleship::enter_reveal fails to verify.
+#!
+#! Invocation: dyncall
+@transaction_script
+pub proc main(args: word)
+    dropw
+    # => [pad(16)]
+
+    padw padw padw padw
+    # => [pad(16), pad(16)]
+
+    call.battleship::enter_reveal
+    # => [pad(16), pad(16)]
+
+    dropw dropw dropw dropw
+    # => [pad(16)]
+end

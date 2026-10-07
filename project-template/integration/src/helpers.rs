@@ -1,422 +1,368 @@
-//! Common helper functions for scripts and tests
+//! Client helpers for the testnet binaries: client setup, game account creation, faucet funding
+//! and thin transaction wrappers.
 
-use std::{borrow::Borrow, collections::BTreeSet, path::Path, sync::Arc};
+use std::{path::PathBuf, process::Command, sync::Arc, time::Duration};
 
 use anyhow::{bail, Context, Result};
-use cargo_miden::{run, OutputType};
 use miden_client::{
-    account::{
-        component::{AccountComponentMetadata, AuthSingleSig, BasicWallet, NoAuth},
-        Account, AccountBuilder, AccountComponent, AccountId, AccountStorageMode, AccountType,
-        StorageSlot,
-    },
-    auth::{AuthScheme, AuthSecretKey, PublicKeyCommitment},
+    account::{Account, AccountId, NetworkId},
+    asset::AssetId,
     builder::ClientBuilder,
-    crypto::{rpo_falcon512::SecretKey, FeltRng},
-    keystore::{FilesystemKeyStore, Keystore},
-    note::{Note, NoteMetadata, NoteRecipient, NoteScript, NoteStorage, NoteTag, NoteType},
-    rpc::{Endpoint, GrpcClient},
-    utils::Deserializable,
-    Client, Word,
+    grpc_support::TESTNET_PROVER_ENDPOINT,
+    keystore::FilesystemKeyStore,
+    note::{Note, NoteRecipient},
+    store::NoteFilter,
+    transaction::{TransactionId, TransactionRequestBuilder, TransactionScript},
+    Client, Felt, RemoteTransactionProver, Word,
 };
 use miden_client_sqlite_store::ClientBuilderSqliteExt;
-use miden_core::Felt;
-use miden_mast_package::{Package, SectionId};
-use rand::RngCore;
+use sha2::{Digest, Sha256};
 
-/// Test setup configuration containing initialized client and keystore
+use crate::battleship::{game_account_builder, BattleshipScripts};
+
+/// Public testnet faucet HTTP API.
+pub const TESTNET_FAUCET_API: &str = "https://faucet-api.testnet.miden.io";
+/// USDCx has 6 decimals: one token in base units.
+pub const ONE_USDCX: u64 = 1_000_000;
+/// Proving a battleship transaction on the remote prover takes tens of seconds.
+pub const PROVER_TIMEOUT: Duration = Duration::from_secs(300);
+
+pub type TestnetClient = Client<FilesystemKeyStore>;
+
+/// Initialized client plus its keystore.
 pub struct ClientSetup {
-    pub client: Client<FilesystemKeyStore>,
+    pub client: TestnetClient,
     pub keystore: Arc<FilesystemKeyStore>,
 }
 
-/// Initializes test infrastructure with client and keystore
-///
-/// # Returns
-/// A `ClientSetup` containing the initialized client and keystore
-///
-/// # Errors
-/// Returns an error if RPC connection fails, keystore initialization fails,
-/// or client building fails
-pub async fn setup_client() -> Result<ClientSetup> {
-    // Initialize RPC connection
-    let endpoint = Endpoint::testnet();
-    let timeout_ms = 10_000;
-    let rpc_client = Arc::new(GrpcClient::new(&endpoint, timeout_ms));
-
-    // Initialize keystore
-    let keystore_path = std::path::PathBuf::from("../keystore");
-
+/// Builds a testnet client whose SQLite store and keystore live under `project-template/` as
+/// `testnet-store-<name>.sqlite3` and `testnet-keystore-<name>/`. Paths are per name so two
+/// players can run side by side; 0.14 stores are incompatible and must not be reused.
+pub async fn setup_testnet_client(name: &str) -> Result<ClientSetup> {
+    let keystore_path = PathBuf::from(format!("testnet-keystore-{name}"));
     let keystore =
-        Arc::new(FilesystemKeyStore::new(keystore_path).context("Failed to initialize keystore")?);
-
-    let store_path = std::path::PathBuf::from("../store.sqlite3");
-
-    let client = ClientBuilder::new()
-        .rpc(rpc_client)
+        Arc::new(FilesystemKeyStore::new(keystore_path).context("failed to initialize keystore")?);
+    let store_path = PathBuf::from(format!("testnet-store-{name}.sqlite3"));
+    let prover = RemoteTransactionProver::new(TESTNET_PROVER_ENDPOINT).with_timeout(PROVER_TIMEOUT);
+    let client = ClientBuilder::for_testnet()
         .sqlite_store(store_path)
         .authenticator(keystore.clone())
-        .in_debug_mode(true.into())
+        .prover(Arc::new(prover))
         .build()
         .await
-        .context("Failed to build Miden client")?;
-
+        .context("failed to build testnet client")?;
     Ok(ClientSetup { client, keystore })
 }
 
-/// Builds a Miden project in the specified directory
-///
-/// # Arguments
-/// * `dir` - Path to the directory containing the Cargo.toml
-/// * `release` - Whether to build in release mode
-///
-/// # Returns
-/// The compiled `Package`
-///
-/// # Errors
-/// Returns an error if compilation fails or if the output is not in the expected format
-pub fn build_project_in_dir(dir: &Path, release: bool) -> Result<Package> {
-    let profile = if release { "--release" } else { "--debug" };
-    let manifest_path = dir.join("Cargo.toml");
-    let manifest_arg = manifest_path.to_string_lossy();
-
-    let args = vec![
-        "cargo",
-        "miden",
-        "build",
-        profile,
-        "--manifest-path",
-        &manifest_arg,
-    ];
-
-    let output = run(args.into_iter().map(String::from), OutputType::Masm)
-        .context("Failed to compile project")?
-        .context("Cargo miden build returned None")?;
-
-    let artifact_path = match output {
-        cargo_miden::CommandOutput::BuildCommandOutput { output } => match output {
-            cargo_miden::BuildOutput::Masm { artifact_path } => artifact_path,
-            other => bail!("Expected Masm output, got {:?}", other),
-        },
-        other => bail!("Expected BuildCommandOutput, got {:?}", other),
-    };
-
-    let package_bytes = std::fs::read(&artifact_path).context(format!(
-        "Failed to read compiled package from {}",
-        artifact_path.display()
-    ))?;
-
-    Package::read_from_bytes(&package_bytes).context("Failed to deserialize package from bytes")
+/// Creates a new game account (battleship + BasicWallet + NoAuth, public) and registers it with
+/// the client. The account exists on chain once its first transaction (consuming the funding
+/// note) is committed.
+pub async fn create_game_account(
+    client: &mut TestnetClient,
+    scripts: &BattleshipScripts,
+) -> Result<Account> {
+    let seed: [u8; 32] = rand::random();
+    let account = game_account_builder(seed, scripts.component.clone())
+        .build()
+        .context("failed to build game account")?;
+    client
+        .add_account(&account, false)
+        .await
+        .context("failed to add game account to the client")?;
+    Ok(account)
 }
 
-/// Configuration for creating an account with a custom component
-#[derive(Clone)]
-pub struct AccountCreationConfig {
-    pub account_type: AccountType,
-    pub storage_mode: AccountStorageMode,
-    pub storage_slots: Vec<StorageSlot>,
-    pub supported_types: Option<Vec<AccountType>>,
+/// Returns the chain's fee asset (USDCx on testnet) as reported by the latest synced block.
+pub async fn fee_asset_id(client: &mut TestnetClient) -> Result<AssetId> {
+    client.sync_state().await.context("sync failed")?;
+    let header = client.get_latest_block_header().await?;
+    let config = client
+        .get_protocol_config(header.protocol_config_commitment())
+        .await
+        .context("protocol config not available; sync first")?;
+    Ok(config.fee_asset_id())
 }
 
-impl Default for AccountCreationConfig {
-    fn default() -> Self {
-        Self {
-            account_type: AccountType::RegularAccountImmutableCode,
-            storage_mode: AccountStorageMode::Public,
-            storage_slots: vec![],
-            supported_types: None,
+/// Returns the latest tracked state of `account_id`.
+pub async fn tracked_account(client: &TestnetClient, account_id: AccountId) -> Result<Account> {
+    client
+        .get_account(account_id)
+        .await?
+        .with_context(|| format!("account {} is not tracked", account_id.to_hex()))
+}
+
+/// Returns the balance of `asset_id` in the tracked account's vault.
+pub async fn fee_asset_balance(
+    client: &TestnetClient,
+    account_id: AccountId,
+    asset_id: AssetId,
+) -> Result<u64> {
+    let account = tracked_account(client, account_id).await?;
+    Ok(account
+        .vault()
+        .get_balance(asset_id)
+        .map(|amount| amount.as_u64())
+        .unwrap_or(0))
+}
+
+// ============================================================================
+// Faucet funding (public testnet faucet, sha256 proof of work)
+// ============================================================================
+
+fn curl_get(url: &str) -> Result<String> {
+    let output = Command::new("curl")
+        .args(["-sS", "--fail-with-body", "--max-time", "60", url])
+        .output()
+        .context("failed to run curl")?;
+    let body = String::from_utf8_lossy(&output.stdout).to_string();
+    if !output.status.success() {
+        bail!(
+            "GET {url} failed: {} {}",
+            String::from_utf8_lossy(&output.stderr).trim(),
+            body.trim()
+        );
+    }
+    Ok(body)
+}
+
+fn solve_pow(challenge_hex: &str, target: u64) -> Result<u64> {
+    let challenge = (0..challenge_hex.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&challenge_hex[i..i + 2], 16))
+        .collect::<Result<Vec<u8>, _>>()
+        .context("challenge is not hex")?;
+    for nonce in 0u64..100_000_000 {
+        let mut hasher = Sha256::new();
+        hasher.update(&challenge);
+        hasher.update(nonce.to_be_bytes());
+        let digest = hasher.finalize();
+        let head = u64::from_be_bytes(digest[..8].try_into().expect("8 bytes"));
+        if head < target {
+            return Ok(nonce);
+        }
+    }
+    bail!("no proof-of-work solution found")
+}
+
+/// Requests `amount` base units of the fee asset for `account_id` from the testnet faucet as a
+/// public P2ID note. Retries on 429 (shared cooldown). Returns the faucet's note id string.
+pub fn request_faucet_tokens(account_id: AccountId, amount: u64) -> Result<String> {
+    let bech32 = account_id.to_bech32(NetworkId::Testnet);
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        let pow: serde_json::Value = serde_json::from_str(&curl_get(&format!(
+            "{TESTNET_FAUCET_API}/pow?account_id={bech32}&amount={amount}"
+        ))?)
+        .context("invalid /pow response")?;
+        let challenge = pow["challenge"]
+            .as_str()
+            .context("/pow: missing challenge")?;
+        let target = pow["target"].as_u64().context("/pow: missing target")?;
+        let nonce = solve_pow(challenge, target)?;
+        let url = format!(
+            "{TESTNET_FAUCET_API}/get_tokens?account_id={bech32}&is_private_note=false&asset_amount={amount}&challenge={challenge}&nonce={nonce}"
+        );
+        match curl_get(&url) {
+            Ok(body) => {
+                let value: serde_json::Value =
+                    serde_json::from_str(&body).context("invalid /get_tokens response")?;
+                return Ok(value["note_id"].as_str().unwrap_or(body.trim()).to_string());
+            }
+            Err(e) if attempts < 6 && e.to_string().contains("429") => {
+                println!("  faucet busy (429), retrying in 20 s...");
+                std::thread::sleep(Duration::from_secs(20));
+            }
+            Err(e) => return Err(e),
         }
     }
 }
 
-/// Creates an account component from a compiled package
-///
-/// # Arguments
-/// * `package` - The compiled package containing account component metadata
-/// * `config` - Configuration for account creation
-///
-/// # Returns
-/// An `AccountComponent` configured according to the provided config
-///
-/// # Errors
-/// Returns an error if the package doesn't contain account component metadata or deserialization fails
-pub fn account_component_from_package(
-    package: Arc<Package>,
-    config: &AccountCreationConfig,
-) -> Result<AccountComponent> {
-    // Find the account component metadata section in the package
-    let account_component_metadata = package.sections.iter().find_map(|s| {
-        if s.id == SectionId::ACCOUNT_COMPONENT_METADATA {
-            Some(s.data.borrow())
-        } else {
-            None
+// ============================================================================
+// Sync and note discovery
+// ============================================================================
+
+/// Syncs until `predicate` finds a note among the client's committed, unconsumed notes.
+pub async fn wait_for_note(
+    client: &mut TestnetClient,
+    timeout: Duration,
+    mut predicate: impl FnMut(&Note) -> bool,
+) -> Result<Note> {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        client.sync_state().await.context("sync failed")?;
+        for record in client.get_input_notes(NoteFilter::Committed).await? {
+            let Ok(note) = TryInto::<Note>::try_into(record) else {
+                continue;
+            };
+            if predicate(&note) {
+                return Ok(note);
+            }
         }
-    });
-
-    let account_component = match account_component_metadata {
-        None => bail!("Package missing account component metadata"),
-        Some(bytes) => {
-            let metadata = AccountComponentMetadata::read_from_bytes(bytes)
-                .context("Failed to deserialize account component metadata")?;
-
-            AccountComponent::new(
-                package.mast.as_ref().clone(),
-                config.storage_slots.clone(),
-                metadata,
-            )
-            .context("Failed to create account component")?
+        if std::time::Instant::now() > deadline {
+            bail!("timed out after {timeout:?} waiting for a note");
         }
-    };
-
-    Ok(account_component)
-}
-
-/// Creates an account with a custom component from a compiled package
-///
-/// # Arguments
-/// * `client` - The Miden client instance
-/// * `package` - The compiled package containing the account component
-/// * `config` - Configuration for account creation
-///
-/// # Returns
-/// The created `Account`
-///
-/// # Errors
-/// Returns an error if account creation or client operations fail
-pub async fn create_account_from_package(
-    client: &mut Client<FilesystemKeyStore>,
-    package: Arc<Package>,
-    config: AccountCreationConfig,
-) -> Result<Account> {
-    let account_component = account_component_from_package(package, &config)
-        .context("Failed to create account component from package")?;
-
-    let mut init_seed = [0_u8; 32];
-    client.rng().fill_bytes(&mut init_seed);
-
-    let account = AccountBuilder::new(init_seed)
-        .account_type(config.account_type)
-        .storage_mode(config.storage_mode)
-        .with_component(account_component)
-        .with_auth_component(NoAuth)
-        .build()
-        .context("Failed to build account")?;
-
-    println!("Account ID: {:?}", account.id());
-
-    client
-        .add_account(&account, false)
-        .await
-        .context("Failed to add account to client")?;
-
-    Ok(account)
-}
-
-pub async fn create_testing_account_from_package(
-    package: Arc<Package>,
-    config: AccountCreationConfig,
-) -> Result<Account> {
-    let account_component = account_component_from_package(package, &config)
-        .context("Failed to create account component from package")?;
-
-    let account = AccountBuilder::new([3u8; 32])
-        .account_type(config.account_type)
-        .storage_mode(config.storage_mode)
-        .with_component(account_component)
-        .with_auth_component(NoAuth)
-        .build_existing()
-        .context("Failed to build account")?;
-
-    Ok(account)
-}
-
-/// Configuration for creating a note
-pub struct NoteCreationConfig {
-    pub note_type: NoteType,
-    pub tag: NoteTag,
-    pub assets: miden_client::note::NoteAssets,
-    pub inputs: Vec<Felt>,
-}
-
-impl Default for NoteCreationConfig {
-    fn default() -> Self {
-        Self {
-            note_type: NoteType::Public,
-            // Note: This should never fail for valid inputs (0, 0)
-            tag: NoteTag::new(0),
-            assets: Default::default(),
-            inputs: Default::default(),
-        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
 }
 
-/// Creates a note from a compiled package
-///
-/// # Arguments
-/// * `client` - The Miden client instance
-/// * `package` - The compiled package containing the note script
-/// * `sender_id` - The ID of the account sending the note
-/// * `config` - Configuration for note creation
-///
-/// # Returns
-/// The created `Note`
-///
-/// # Errors
-/// Returns an error if note creation fails
-pub fn create_note_from_package(
-    client: &mut Client<FilesystemKeyStore>,
-    package: Arc<Package>,
-    sender_id: AccountId,
-    config: NoteCreationConfig,
+/// Syncs until a note consumable by `account_id` appears (e.g. the faucet's P2ID note).
+pub async fn wait_for_consumable_note(
+    client: &mut TestnetClient,
+    account_id: AccountId,
+    timeout: Duration,
 ) -> Result<Note> {
-    let note_script = NoteScript::from_library(&package.mast)
-        .context("Failed to create note script from library")?;
-
-    let serial_num = client.rng().draw_word();
-    let note_inputs = NoteStorage::new(config.inputs).context("Failed to create note inputs")?;
-    let recipient = NoteRecipient::new(serial_num, note_script, note_inputs);
-
-    let metadata = NoteMetadata::new(sender_id, config.note_type).with_tag(config.tag);
-
-    Ok(Note::new(config.assets, metadata, recipient))
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        client.sync_state().await.context("sync failed")?;
+        if let Some((record, _)) = client.get_consumable_notes(Some(account_id)).await?.pop() {
+            return TryInto::<Note>::try_into(record)
+                .map_err(|e| anyhow::anyhow!("note record: {e:?}"));
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("timed out after {timeout:?} waiting for a consumable note");
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
 }
 
-pub fn create_testing_note_from_package(
-    package: Arc<Package>,
-    sender_id: AccountId,
-    config: NoteCreationConfig,
-) -> Result<Note> {
-    let note_script = NoteScript::from_library(&package.mast)
-        .context("Failed to create note script from library")?;
-
-    // get 4 random u64s and convert them to a word
-    let random_u64s = [0_u64; 4];
-    let serial_num =
-        Word::try_from(random_u64s).context("Failed to convert random u64s to word")?;
-
-    let note_inputs = NoteStorage::new(config.inputs).context("Failed to create note inputs")?;
-    let recipient = NoteRecipient::new(serial_num, note_script, note_inputs);
-
-    let metadata = NoteMetadata::new(sender_id, config.note_type).with_tag(config.tag);
-
-    Ok(Note::new(config.assets, metadata, recipient))
+/// Syncs until the transaction is committed.
+pub async fn wait_for_commit(
+    client: &mut TestnetClient,
+    tx_id: TransactionId,
+    timeout: Duration,
+) -> Result<()> {
+    use miden_client::store::TransactionFilter;
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        client.sync_state().await.context("sync failed")?;
+        let uncommitted = client
+            .get_transactions(TransactionFilter::Uncommitted)
+            .await?;
+        if !uncommitted.iter().any(|tx| tx.id == tx_id) {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            bail!("timed out after {timeout:?} waiting for tx {tx_id} to commit");
+        }
+        tokio::time::sleep(Duration::from_secs(3)).await;
+    }
 }
 
-/// Creates a basic wallet account with authentication
-///
-/// # Arguments
-/// * `client` - The Miden client instance
-/// * `keystore` - The keystore for storing authentication keys
-/// * `config` - Configuration for account creation
-///
-/// # Returns
-/// The created `Account` with basic wallet functionality
-///
-/// # Errors
-/// Returns an error if account creation, key generation, or keystore operations fail
-pub async fn create_basic_wallet_account(
-    client: &mut Client<FilesystemKeyStore>,
-    keystore: Arc<FilesystemKeyStore>,
-    config: AccountCreationConfig,
-) -> Result<Account> {
-    let mut init_seed = [0_u8; 32];
-    client.rng().fill_bytes(&mut init_seed);
+// ============================================================================
+// Transactions
+// ============================================================================
 
-    let key_pair = SecretKey::with_rng(client.rng());
+/// Submits a transaction and waits for it to commit.
+async fn submit_and_wait(
+    client: &mut TestnetClient,
+    account_id: AccountId,
+    request: miden_client::transaction::TransactionRequest,
+) -> Result<TransactionId> {
+    let tx_id = client
+        .submit_new_transaction(account_id, request)
+        .await
+        .context("failed to submit transaction")?;
+    wait_for_commit(client, tx_id, Duration::from_secs(300)).await?;
+    Ok(tx_id)
+}
 
-    let builder = AccountBuilder::new(init_seed)
-        .account_type(config.account_type)
-        .storage_mode(config.storage_mode)
-        .with_auth_component(AuthSingleSig::new(PublicKeyCommitment::from(
-            key_pair.public_key().to_commitment(),
-        ), AuthScheme::Falcon512Poseidon2))
-        .with_component(BasicWallet);
+/// Consumes `notes` on `account_id` (also the deploy path for a fresh, funded account).
+pub async fn consume_notes(
+    client: &mut TestnetClient,
+    account_id: AccountId,
+    notes: Vec<Note>,
+) -> Result<TransactionId> {
+    let request = TransactionRequestBuilder::new()
+        .build_consume_notes(notes)
+        .context("failed to build consume request")?;
+    submit_and_wait(client, account_id, request).await
+}
 
-    let account = builder
+/// Consumes a shot note on the defender's account; the result note is created by the component.
+pub async fn consume_shot_note(
+    client: &mut TestnetClient,
+    account_id: AccountId,
+    shot_note: Note,
+    result_recipient: NoteRecipient,
+) -> Result<TransactionId> {
+    let request = TransactionRequestBuilder::new()
+        .input_notes([(shot_note, None)])
+        .expected_output_recipients([result_recipient])
         .build()
-        .context("Failed to build basic wallet account")?;
-
-    client
-        .add_account(&account, false)
-        .await
-        .context("Failed to add account to client")?;
-
-    keystore
-        .add_key(&AuthSecretKey::Falcon512Poseidon2(key_pair), account.id())
-        .await
-        .context("Failed to add key to keystore")?;
-
-    Ok(account)
+        .context("failed to build shot request")?;
+    submit_and_wait(client, account_id, request).await
 }
 
-/// Initializes client infrastructure for local node at localhost:57291.
-/// Uses separate paths from testnet to avoid contamination.
-pub async fn setup_local_client() -> Result<ClientSetup> {
-    setup_local_client_for_player("default").await
-}
-
-/// Initializes client for a specific player against local node.
-/// Each player gets separate SQLite store and keystore.
-pub async fn setup_local_client_for_player(player_name: &str) -> Result<ClientSetup> {
-    let endpoint = Endpoint::new("http".into(), "localhost".into(), Some(57291));
-    let timeout_ms = 10_000;
-    let rpc_client = Arc::new(GrpcClient::new(&endpoint, timeout_ms));
-
-    let keystore_path = std::path::PathBuf::from(format!("local-keystore-{}", player_name));
-    let keystore = Arc::new(
-        FilesystemKeyStore::new(keystore_path).context("Failed to initialize local keystore")?,
-    );
-
-    let store_path = std::path::PathBuf::from(format!("local-store-{}.sqlite3", player_name));
-
-    let client = ClientBuilder::new()
-        .rpc(rpc_client)
-        .sqlite_store(store_path)
-        .authenticator(keystore.clone())
-        .in_debug_mode(true.into())
+/// Creates `note` as an output note of `account_id` (requires the BasicWallet interface).
+pub async fn publish_note(
+    client: &mut TestnetClient,
+    account_id: AccountId,
+    note: Note,
+) -> Result<TransactionId> {
+    let request = TransactionRequestBuilder::new()
+        .own_output_notes([note])
         .build()
-        .await
-        .context("Failed to build local Miden client")?;
-
-    Ok(ClientSetup { client, keystore })
+        .context("failed to build publish request")?;
+    submit_and_wait(client, account_id, request).await
 }
 
-/// Creates an account with a custom component AND Falcon512Rpo authentication.
-/// Unlike create_account_from_package (which uses NoAuth), this creates
-/// accounts that can sign transactions on a real node.
-pub async fn create_authenticated_game_account(
-    client: &mut Client<FilesystemKeyStore>,
-    keystore: Arc<FilesystemKeyStore>,
-    package: Arc<Package>,
-    config: AccountCreationConfig,
-) -> Result<Account> {
-    let account_component = account_component_from_package(package, &config)
-        .context("Failed to create account component from package")?;
+/// Runs a transaction script on `account_id`, optionally with a script argument and advice map
+/// entries.
+pub async fn run_tx_script(
+    client: &mut TestnetClient,
+    account_id: AccountId,
+    script: TransactionScript,
+    script_arg: Option<Word>,
+    advice_map: Vec<(Word, Vec<Felt>)>,
+) -> Result<TransactionId> {
+    let mut builder = TransactionRequestBuilder::new()
+        .custom_script(script)
+        .extend_advice_map(advice_map);
+    if let Some(arg) = script_arg {
+        builder = builder.script_arg(arg);
+    }
+    let request = builder.build().context("failed to build script request")?;
+    submit_and_wait(client, account_id, request).await
+}
 
-    let mut init_seed = [0_u8; 32];
-    client.rng().fill_bytes(&mut init_seed);
+/// Note id of a note the client can see, for logging.
+pub fn note_id_hex(note: &Note) -> String {
+    note.id().to_hex()
+}
 
-    let key_pair = SecretKey::with_rng(client.rng());
+// ============================================================================
+// Funding
+// ============================================================================
 
-    let account = AccountBuilder::new(init_seed)
-        .account_type(config.account_type)
-        .storage_mode(config.storage_mode)
-        .with_component(account_component)
-        .with_auth_component(AuthSingleSig::new(PublicKeyCommitment::from(
-            key_pair.public_key().to_commitment(),
-        ), AuthScheme::Falcon512Poseidon2))
-        .build()
-        .context("Failed to build authenticated game account")?;
+/// Base units requested per faucet claim (the public faucet caps a claim at 10_000).
+pub const FAUCET_CLAIM_AMOUNT: u64 = 10_000;
 
-    client
-        .add_account(&account, false)
-        .await
-        .context("Failed to add account to client")?;
+/// Claims fee tokens from the faucet for `account_id` and consumes the funding note (this is
+/// also the account's first transaction, which deploys it). Returns the new balance.
+pub async fn fund_from_faucet(
+    client: &mut TestnetClient,
+    account_id: AccountId,
+    fee_asset: AssetId,
+) -> Result<u64> {
+    let note_id = request_faucet_tokens(account_id, FAUCET_CLAIM_AMOUNT)?;
+    println!("  faucet note {note_id} requested, waiting for it to land...");
+    let note = wait_for_consumable_note(client, account_id, Duration::from_secs(180)).await?;
+    consume_notes(client, account_id, vec![note]).await?;
+    fee_asset_balance(client, account_id, fee_asset).await
+}
 
-    keystore
-        .add_key(&AuthSecretKey::Falcon512Poseidon2(key_pair), account.id())
-        .await
-        .context("Failed to add key to keystore")?;
-
-    Ok(account)
+/// Tops the account up from the faucet while its fee balance is below `min_balance`.
+pub async fn ensure_funded(
+    client: &mut TestnetClient,
+    account_id: AccountId,
+    fee_asset: AssetId,
+    min_balance: u64,
+) -> Result<u64> {
+    let mut balance = fee_asset_balance(client, account_id, fee_asset).await?;
+    while balance < min_balance {
+        println!("  balance {balance} < {min_balance}, claiming from the faucet");
+        balance = fund_from_faucet(client, account_id, fee_asset).await?;
+    }
+    Ok(balance)
 }

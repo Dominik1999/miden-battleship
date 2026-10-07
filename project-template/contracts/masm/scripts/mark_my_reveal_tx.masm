@@ -1,0 +1,31 @@
+use battleship::account as battleship
+
+# Mark-reveal transaction script: a player runs it on its own game account after sending its
+# reveal note, to record that the reveal was sent.
+
+# TRANSACTION SCRIPT
+# =================================================================================================
+
+#! Marks the native account's reveal as sent.
+#!
+#! Inputs:  [TX_SCRIPT_ARGS, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - battleship::mark_my_reveal fails to verify.
+#!
+#! Invocation: dyncall
+@transaction_script
+pub proc main(args: word)
+    dropw
+    # => [pad(16)]
+
+    padw padw padw padw
+    # => [pad(16), pad(16)]
+
+    call.battleship::mark_my_reveal
+    # => [pad(16), pad(16)]
+
+    dropw dropw dropw dropw
+    # => [pad(16)]
+end

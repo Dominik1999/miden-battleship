@@ -1,0 +1,845 @@
+use {AccountId, NoteScriptRoot, NoteSerialNumber} from miden::protocol::types
+use miden::core::sys
+use miden::protocol::active_account
+use miden::protocol::active_note
+use miden::protocol::native_account
+use miden::protocol::note
+use miden::protocol::output_note
+use {NOTE_TYPE_PUBLIC} from miden::protocol::note
+use miden::standards::data_structures::array
+use miden::standards::note::note_tag
+
+# The battleship game account component.
+#
+# One account per player per match. The board is private account storage; only the board
+# commitment and the public result notes leave the account. All procedures are entered with `call`
+# from a note script or a transaction script and therefore use the 16-element stack window.
+
+# CONSTANTS
+# =================================================================================================
+
+# Storage slots. Keep these names in sync with `integration/src/battleship.rs`.
+const GAME_CONFIG_SLOT = word("miden_battleship_account::battleship_account::game_config")
+const OPPONENT_SLOT = word("miden_battleship_account::battleship_account::opponent")
+const BOARD_COMMITMENT_SLOT = word("miden_battleship_account::battleship_account::board_commitment")
+const OPPONENT_COMMITMENT_SLOT = word("miden_battleship_account::battleship_account::opponent_commitment")
+const GAME_ID_SLOT = word("miden_battleship_account::battleship_account::game_id")
+const REVEAL_STATUS_SLOT = word("miden_battleship_account::battleship_account::reveal_status")
+# Map slot holding the board rows as an array: key [0, 0, 0, row] -> [packed_row, 0, 0, 0].
+const BOARD_SLOT = word("miden_battleship_account::battleship_account::my_board")
+
+# Board geometry and ship set (classic: 5, 4, 3, 3, 2 cells).
+const GRID_SIZE = 10
+const TOTAL_SHIP_CELLS = 17
+const SHIP_1_SIZE = 5
+const SHIP_2_SIZE = 4
+const SHIP_3_SIZE = 3
+const SHIP_4_SIZE = 3
+const SHIP_5_SIZE = 2
+const MAX_SHIP_ID = 5
+
+# Game phases, stored in game_config[2].
+const PHASE_CREATED = 0
+const PHASE_CHALLENGED = 1
+const PHASE_ACTIVE = 2
+const PHASE_REVEAL = 3
+const PHASE_COMPLETE = 4
+
+# Expected incoming turn right after the handshake: the acceptor defends turn 1 (the challenger
+# fires first), the challenger defends turn 2.
+const ACCEPTOR_FIRST_TURN = 1
+const CHALLENGER_FIRST_TURN = 2
+# Turns alternate, so an account's expected incoming turn advances by 2 per shot it defends.
+const TURN_STRIDE = 2
+
+# Cell encoding: a row packs 10 cells at 3 bits each into one felt (cell c at bits 3c..3c+2).
+const CELL_WATER = 0
+const CELL_HIT = 6
+const CELL_MISS = 7
+const CELL_BITS = 3
+const CELL_MASK = 7
+
+# Result encoding returned by process_shot: is_hit * 2 + game_over.
+const RESULT_HIT_WEIGHT = 2
+
+# Result note storage: [shooter_prefix, shooter_suffix, turn, encoded_result].
+const RESULT_NUM_STORAGE_ITEMS = 4
+
+# set_board_rows locals: rows at 0..9, per-cell-value counters at 10..15 (index = cell value).
+const SET_BOARD_ROWS_ROWS_LOC = 0
+const SET_BOARD_ROWS_COUNTS_LOC = 10
+
+# process_shot locals: the result note storage, word-aligned at local 0.
+const PROCESS_SHOT_RESULT_STORAGE_LOC = 0
+const PROCESS_SHOT_SHOOTER_PREFIX_LOC = 0
+const PROCESS_SHOT_SHOOTER_SUFFIX_LOC = 1
+const PROCESS_SHOT_TURN_LOC = 2
+const PROCESS_SHOT_ENCODED_RESULT_LOC = 3
+
+# ERRORS
+# =================================================================================================
+
+const ERR_SET_BOARD_WRONG_PHASE = "set_board_rows requires the CREATED phase"
+const ERR_ROW_NOT_U32 = "packed board row does not fit in 32 bits"
+const ERR_ROW_HAS_EXTRA_BITS = "packed board row has bits set beyond the 10 cells"
+const ERR_CELL_VALUE_INVALID = "board cell value must be water or a ship id in 1..5"
+const ERR_WRONG_TOTAL_SHIP_CELLS = "board must contain exactly 17 ship cells"
+const ERR_SHIP_1_WRONG_SIZE = "ship 1 (carrier) must occupy 5 cells"
+const ERR_SHIP_2_WRONG_SIZE = "ship 2 (battleship) must occupy 4 cells"
+const ERR_SHIP_3_WRONG_SIZE = "ship 3 (cruiser) must occupy 3 cells"
+const ERR_SHIP_4_WRONG_SIZE = "ship 4 (submarine) must occupy 3 cells"
+const ERR_SHIP_5_WRONG_SIZE = "ship 5 (destroyer) must occupy 2 cells"
+
+const ERR_FINALIZE_WRONG_PHASE = "finalize_board requires the CREATED phase"
+const ERR_FINALIZE_BOARD_ROWS_NOT_SET = "finalize_board requires set_board_rows to have run"
+
+const ERR_ROW_OUT_OF_BOUNDS = "row is out of bounds"
+const ERR_COL_OUT_OF_BOUNDS = "col is out of bounds"
+
+const ERR_SENDER_PREFIX_MISMATCH = "note sender prefix does not match the stored opponent"
+const ERR_SENDER_SUFFIX_MISMATCH = "note sender suffix does not match the stored opponent"
+
+const ERR_HANDSHAKE_WRONG_PHASE = "handshake requires the CHALLENGED phase"
+const ERR_HANDSHAKE_GAME_ID_MISMATCH = "handshake game id does not match the stored game id"
+const ERR_HANDSHAKE_OPPONENT_PREFIX_MISMATCH = "handshake opponent prefix does not match the stored opponent"
+const ERR_HANDSHAKE_OPPONENT_SUFFIX_MISMATCH = "handshake opponent suffix does not match the stored opponent"
+
+const ERR_SHOT_WRONG_PHASE = "process_shot requires the ACTIVE phase"
+const ERR_SHOT_WRONG_TURN = "shot turn does not match the expected turn"
+const ERR_CELL_ALREADY_SHOT = "cell has already been shot"
+
+const ERR_ENTER_REVEAL_WRONG_PHASE = "enter_reveal requires the ACTIVE phase"
+const ERR_MARK_REVEAL_WRONG_PHASE = "mark_my_reveal requires the REVEAL phase"
+const ERR_VERIFY_REVEAL_WRONG_PHASE = "verify_opponent_reveal requires the REVEAL phase"
+const ERR_REVEAL_COMMITMENT_MISMATCH = "revealed commitment does not match the stored opponent commitment"
+
+# PUBLIC INTERFACE
+# =================================================================================================
+
+#! Validates and stores the packed board rows. Must run before finalize_board, in the same or an
+#! earlier transaction.
+#!
+#! Each row packs 10 cells at 3 bits per cell; a cell is water (0) or a ship id (1..5). The rows
+#! must contain exactly the classic ship set: 5 + 4 + 3 + 3 + 2 = 17 ship cells. The rows are
+#! written to the board array and game_config becomes [GRID_SIZE, TOTAL_SHIP_CELLS, CREATED, 0].
+#!
+#! Inputs:  [ROWS_A, ROWS_B, ROWS_C, pad(4)]
+#! Outputs: [pad(16)]
+#!
+#! Where:
+#! - ROWS_A is [row_0, row_1, row_2, row_3].
+#! - ROWS_B is [row_4, row_5, row_6, row_7].
+#! - ROWS_C is [row_8, row_9, 0, 0].
+#!
+#! Panics if:
+#! - the game is not in the CREATED phase.
+#! - a row does not fit in 32 bits or has bits set beyond its 10 cells.
+#! - a cell value is greater than 5.
+#! - the ship cell counts do not match the classic ship set.
+#!
+#! Invocation: call
+@account_procedure
+@locals(16)
+pub proc set_board_rows(rows_a: word, rows_b: word, rows_c: word)
+    exec.get_phase eq.PHASE_CREATED assert.err=ERR_SET_BOARD_WRONG_PHASE
+    # => [row_0, ..., row_9, pad(6)]
+
+    # save the rows to locals 0..9
+    locaddr.SET_BOARD_ROWS_ROWS_LOC mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.1 mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.2 mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.3 mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.4 mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.5 mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.6 mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.7 mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.8 mem_store
+    locaddr.SET_BOARD_ROWS_ROWS_LOC add.9 mem_store
+    # => [pad(16)]
+
+    # zero the six cell-value counters
+    push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC mem_store
+    push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC add.1 mem_store
+    push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC add.2 mem_store
+    push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC add.3 mem_store
+    push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC add.4 mem_store
+    push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC add.5 mem_store
+    # => [pad(16)]
+
+    # count the cell values of every row
+    push.0
+    # => [row_idx, pad(16)]
+    dup neq.GRID_SIZE
+    while.true
+        # => [row_idx, pad(16)]
+        dup locaddr.SET_BOARD_ROWS_ROWS_LOC add mem_load
+        # => [packed_row, row_idx, pad(16)]
+
+        u32assert.err=ERR_ROW_NOT_U32
+        locaddr.SET_BOARD_ROWS_COUNTS_LOC exec.count_row_cells
+        # => [row_idx, pad(16)]
+
+        add.1 dup neq.GRID_SIZE
+        # => [row_idx != GRID_SIZE, row_idx, pad(16)]
+    end
+    drop
+    # => [pad(16)]
+
+    # validate the ship set
+    locaddr.SET_BOARD_ROWS_COUNTS_LOC add.1 mem_load
+    locaddr.SET_BOARD_ROWS_COUNTS_LOC add.2 mem_load
+    locaddr.SET_BOARD_ROWS_COUNTS_LOC add.3 mem_load
+    locaddr.SET_BOARD_ROWS_COUNTS_LOC add.4 mem_load
+    locaddr.SET_BOARD_ROWS_COUNTS_LOC add.5 mem_load
+    # => [count_5, count_4, count_3, count_2, count_1, pad(16)]
+
+    dup.4 dup.4 add dup.3 add dup.2 add dup.1 add
+    # => [total, count_5, count_4, count_3, count_2, count_1, pad(16)]
+
+    eq.TOTAL_SHIP_CELLS assert.err=ERR_WRONG_TOTAL_SHIP_CELLS
+    eq.SHIP_5_SIZE assert.err=ERR_SHIP_5_WRONG_SIZE
+    eq.SHIP_4_SIZE assert.err=ERR_SHIP_4_WRONG_SIZE
+    eq.SHIP_3_SIZE assert.err=ERR_SHIP_3_WRONG_SIZE
+    eq.SHIP_2_SIZE assert.err=ERR_SHIP_2_WRONG_SIZE
+    eq.SHIP_1_SIZE assert.err=ERR_SHIP_1_WRONG_SIZE
+    # => [pad(16)]
+
+    # write the rows to the board array
+    push.0
+    # => [row_idx, pad(16)]
+    dup neq.GRID_SIZE
+    while.true
+        # => [row_idx, pad(16)]
+        push.0.0.0 dup.3 locaddr.SET_BOARD_ROWS_ROWS_LOC add mem_load
+        # => [packed_row, 0, 0, 0, row_idx, pad(16)]
+
+        dup.4 push.BOARD_SLOT[0..2]
+        # => [slot_suffix, slot_prefix, row_idx, VALUE, row_idx, pad(16)]
+
+        exec.array::set dropw
+        # => [row_idx, pad(16)]
+
+        add.1 dup neq.GRID_SIZE
+        # => [row_idx != GRID_SIZE, row_idx, pad(16)]
+    end
+    drop
+    # => [pad(16)]
+
+    # game_config = [GRID_SIZE, TOTAL_SHIP_CELLS, PHASE_CREATED, 0]
+    push.0 push.PHASE_CREATED push.TOTAL_SHIP_CELLS push.GRID_SIZE
+    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
+    # => [pad(16)]
+
+    exec.sys::truncate_stack
+    # => [pad(16)]
+end
+
+#! Finalizes the board setup: stores the game id, the opponent and the board commitment, and
+#! moves the game from CREATED to CHALLENGED.
+#!
+#! Inputs:  [GAME_ID, opponent_id_suffix, opponent_id_prefix, COMMITMENT, pad(6)]
+#! Outputs: [pad(16)]
+#!
+#! Where:
+#! - GAME_ID is the shared game identifier.
+#! - opponent_id_{suffix,prefix} are the suffix and prefix felts of the opponent's account ID.
+#! - COMMITMENT is this player's salted board commitment.
+#!
+#! Panics if:
+#! - the game is not in the CREATED phase.
+#! - set_board_rows has not stored the board rows.
+#!
+#! Invocation: call
+@account_procedure
+pub proc finalize_board(game_id: word, opponent_id: AccountId, commitment: word)
+    exec.get_game_config
+    # => [grid_size, num_placed, phase, expected_turn, GAME_ID, opponent_id_suffix, opponent_id_prefix, COMMITMENT, pad(6)]
+
+    drop swap eq.PHASE_CREATED assert.err=ERR_FINALIZE_WRONG_PHASE
+    # => [num_placed, expected_turn, GAME_ID, ...]
+
+    eq.TOTAL_SHIP_CELLS assert.err=ERR_FINALIZE_BOARD_ROWS_NOT_SET drop
+    # => [GAME_ID, opponent_id_suffix, opponent_id_prefix, COMMITMENT, pad(6)]
+
+    push.GAME_ID_SLOT[0..2] exec.native_account::set_item dropw
+    # => [opponent_id_suffix, opponent_id_prefix, COMMITMENT, pad(6)]
+
+    # opponent = [opponent_prefix, opponent_suffix, ships_hit_count = 0, total_shots_received = 0]
+    swap push.0.0 movup.3 movup.3
+    # => [opponent_id_prefix, opponent_id_suffix, 0, 0, COMMITMENT, pad(6)]
+
+    push.OPPONENT_SLOT[0..2] exec.native_account::set_item dropw
+    # => [COMMITMENT, pad(6)]
+
+    push.BOARD_COMMITMENT_SLOT[0..2] exec.native_account::set_item dropw
+    # => [pad(6)]
+
+    # game_config = [GRID_SIZE, TOTAL_SHIP_CELLS, PHASE_CHALLENGED, 0]
+    push.0 push.PHASE_CHALLENGED push.TOTAL_SHIP_CELLS push.GRID_SIZE
+    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
+    # => [pad(16)]
+
+    exec.sys::truncate_stack
+    # => [pad(16)]
+end
+
+#! Returns the state of a board cell: water (0), a ship id (1..5), hit (6) or miss (7).
+#!
+#! Inputs:  [row, col, pad(14)]
+#! Outputs: [cell, pad(15)]
+#!
+#! Panics if:
+#! - row or col is not a u32 below GRID_SIZE.
+#!
+#! Invocation: call
+@account_procedure
+pub proc get_cell(row: u32, col: u32) -> u8
+    exec.assert_in_bounds
+    # => [row, col, pad(14)]
+
+    exec.load_packed_row
+    # => [packed_row, col, pad(14)]
+
+    swap mul.CELL_BITS u32shr
+    # => [packed_row >> shift, pad(14)]
+
+    push.CELL_MASK u32and
+    # => [cell, pad(15)]
+
+    exec.sys::truncate_stack
+    # => [cell, pad(15)]
+end
+
+#! Returns the current game phase.
+#!
+#! Inputs:  [pad(16)]
+#! Outputs: [phase, pad(15)]
+#!
+#! Invocation: call
+@account_procedure
+pub proc get_game_phase() -> u8
+    exec.get_phase
+    # => [phase, pad(16)]
+
+    exec.sys::truncate_stack
+    # => [phase, pad(15)]
+end
+
+#! Accepts a challenge: runs on the acceptor's account when it consumes the challenge note.
+#!
+#! Stores the challenger's board commitment and moves the game from CHALLENGED to ACTIVE with
+#! expected incoming turn 1 (the challenger fires first).
+#!
+#! Inputs:  [GAME_ID, challenger_id_suffix, challenger_id_prefix, CHALLENGER_COMMITMENT, pad(6)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the active note's sender is not the stored opponent.
+#! - the game is not in the CHALLENGED phase.
+#! - GAME_ID or the challenger id does not match the stored game id or opponent.
+#!
+#! Invocation: call
+@account_procedure
+pub proc accept_challenge(game_id: word, challenger_id: AccountId, challenger_commitment: word)
+    exec.apply_handshake
+    # => [pad(16)]
+
+    push.ACCEPTOR_FIRST_TURN exec.set_active_phase
+    # => [pad(16)]
+
+    exec.sys::truncate_stack
+    # => [pad(16)]
+end
+
+#! Receives an acceptance: runs on the challenger's account when it consumes the accept note.
+#!
+#! Stores the acceptor's board commitment and moves the game from CHALLENGED to ACTIVE with
+#! expected incoming turn 2 (the challenger fires turn 1 itself).
+#!
+#! Inputs:  [GAME_ID, acceptor_id_suffix, acceptor_id_prefix, ACCEPTOR_COMMITMENT, pad(6)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the active note's sender is not the stored opponent.
+#! - the game is not in the CHALLENGED phase.
+#! - GAME_ID or the acceptor id does not match the stored game id or opponent.
+#!
+#! Invocation: call
+@account_procedure
+pub proc receive_acceptance(game_id: word, acceptor_id: AccountId, acceptor_commitment: word)
+    exec.apply_handshake
+    # => [pad(16)]
+
+    push.CHALLENGER_FIRST_TURN exec.set_active_phase
+    # => [pad(16)]
+
+    exec.sys::truncate_stack
+    # => [pad(16)]
+end
+
+#! Processes an incoming shot and creates the public result note for the shooter.
+#!
+#! The targeted cell becomes CELL_HIT or CELL_MISS, the counters in the opponent slot advance,
+#! the expected incoming turn advances by 2 and, when the 17th ship cell is hit, the game moves
+#! from ACTIVE to REVEAL. The result note is created with storage
+#! [shooter_prefix, shooter_suffix, turn, encoded_result], the given serial number and script
+#! root, note type public and the tag targeting the stored opponent's account.
+#!
+#! Inputs:  [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+#! Outputs: [encoded_result, pad(15)]
+#!
+#! Where:
+#! - row and col are the targeted cell.
+#! - turn is the turn number of the shot.
+#! - RESULT_SERIAL_NUM is the serial number of the result note to create.
+#! - RESULT_SCRIPT_ROOT is the script root of the result note to create.
+#! - encoded_result is is_hit * 2 + game_over.
+#!
+#! Panics if:
+#! - the active note's sender is not the stored opponent.
+#! - the game is not in the ACTIVE phase.
+#! - turn is not the expected incoming turn.
+#! - row or col is not a u32 below GRID_SIZE.
+#! - the cell has already been shot.
+#!
+#! Invocation: call
+@account_procedure
+@locals(4)
+pub proc process_shot(
+    row: u32,
+    col: u32,
+    turn: felt,
+    result_serial_num: NoteSerialNumber,
+    result_script_root: NoteScriptRoot
+) -> u8
+    exec.assert_sender_is_opponent
+    # => [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    exec.get_game_config drop drop
+    # => [phase, expected_turn, row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    eq.PHASE_ACTIVE assert.err=ERR_SHOT_WRONG_PHASE
+    # => [expected_turn, row, col, turn, ...]
+
+    dup.3 assert_eq.err=ERR_SHOT_WRONG_TURN
+    # => [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    exec.assert_in_bounds
+    # => [row, col, turn, ...]
+
+    dup exec.load_packed_row
+    # => [packed_row, row, col, turn, ...]
+
+    dup.2 mul.CELL_BITS
+    # => [shift, packed_row, row, col, turn, ...]
+
+    dup.1 dup.1 u32shr push.CELL_MASK u32and
+    # => [cell, shift, packed_row, row, col, turn, ...]
+
+    dup push.MAX_SHIP_ID u32lte assert.err=ERR_CELL_ALREADY_SHOT
+    # => [cell, shift, packed_row, row, col, turn, ...]
+
+    neq.CELL_WATER
+    # => [is_hit, shift, packed_row, row, col, turn, ...]
+
+    push.CELL_MISS push.CELL_HIT dup.2 cdrop
+    # => [new_cell, is_hit, shift, packed_row, row, col, turn, ...]
+
+    dup.2 u32shl
+    # => [new_cell << shift, is_hit, shift, packed_row, row, col, turn, ...]
+
+    dup.2 push.CELL_MASK swap u32shl u32not
+    # => [clear_mask, new_cell << shift, is_hit, shift, packed_row, row, col, turn, ...]
+
+    movup.4 u32and u32or
+    # => [new_packed_row, is_hit, shift, row, col, turn, ...]
+
+    movup.2 drop
+    # => [new_packed_row, is_hit, row, col, turn, ...]
+
+    push.0.0.0 movup.3 dup.5 push.BOARD_SLOT[0..2]
+    # => [slot_suffix, slot_prefix, row, NEW_ROW_VALUE, is_hit, row, col, turn, ...]
+
+    exec.array::set dropw
+    # => [is_hit, row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    swap drop swap drop
+    # => [is_hit, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    # advance the counters: ships_hit_count += is_hit, total_shots_received += 1
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    # => [opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received, is_hit, turn, ...]
+
+    dup.4 movup.3 add swap movup.3 add.1
+    # => [total_shots_received', opponent_prefix, ships_hit_count', opponent_suffix, is_hit, turn, ...]
+
+    movdn.3 movup.2 swap
+    # => [opponent_prefix, opponent_suffix, ships_hit_count', total_shots_received', is_hit, turn, ...]
+
+    dup.2 eq.TOTAL_SHIP_CELLS movdn.4
+    # => [opponent_prefix, opponent_suffix, ships_hit_count', total_shots_received', game_over, is_hit, turn, ...]
+
+    push.OPPONENT_SLOT[0..2] exec.native_account::set_item dropw
+    # => [game_over, is_hit, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    # game_config = [GRID_SIZE, TOTAL_SHIP_CELLS, game_over ? REVEAL : ACTIVE, turn + TURN_STRIDE]
+    dup.2 add.TURN_STRIDE
+    # => [next_turn, game_over, is_hit, turn, ...]
+
+    push.PHASE_ACTIVE push.PHASE_REVEAL dup.3 cdrop
+    # => [next_phase, next_turn, game_over, is_hit, turn, ...]
+
+    push.TOTAL_SHIP_CELLS push.GRID_SIZE
+    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
+    # => [game_over, is_hit, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    swap mul.RESULT_HIT_WEIGHT add
+    # => [encoded_result, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    # result note storage = [shooter_prefix, shooter_suffix, turn, encoded_result]
+    dup locaddr.PROCESS_SHOT_ENCODED_RESULT_LOC mem_store
+    dup.1 locaddr.PROCESS_SHOT_TURN_LOC mem_store
+    # => [encoded_result, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    # => [opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received, encoded_result, turn, ...]
+
+    movup.2 drop movup.2 drop
+    # => [opponent_prefix, opponent_suffix, encoded_result, turn, ...]
+
+    locaddr.PROCESS_SHOT_SHOOTER_PREFIX_LOC mem_store
+    locaddr.PROCESS_SHOT_SHOOTER_SUFFIX_LOC mem_store
+    # => [encoded_result, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+
+    movdn.9 movdn.9
+    # => [RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, turn, encoded_result, pad(5)]
+
+    push.RESULT_NUM_STORAGE_ITEMS locaddr.PROCESS_SHOT_RESULT_STORAGE_LOC
+    # => [storage_ptr, num_storage_items, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, turn, encoded_result, pad(5)]
+
+    exec.note::compute_and_store_recipient
+    # => [RECIPIENT, turn, encoded_result, pad(5)]
+
+    # the tag targets the shooter, i.e. the stored opponent
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    # => [opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received, RECIPIENT, turn, encoded_result, pad(5)]
+
+    movdn.3 drop drop drop exec.note_tag::create_account_target
+    # => [tag, RECIPIENT, turn, encoded_result, pad(5)]
+
+    push.NOTE_TYPE_PUBLIC swap
+    # => [tag, note_type, RECIPIENT, turn, encoded_result, pad(5)]
+
+    exec.output_note::create drop
+    # => [turn, encoded_result, pad(5)]
+
+    drop
+    # => [encoded_result, pad(15)]
+
+    exec.sys::truncate_stack
+    # => [encoded_result, pad(15)]
+end
+
+#! Moves the game from ACTIVE to REVEAL. The winner calls this on its own account after the
+#! opponent's board has been sunk.
+#!
+#! Inputs:  [pad(16)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the game is not in the ACTIVE phase.
+#!
+#! Invocation: call
+@account_procedure
+pub proc enter_reveal()
+    exec.get_game_config
+    # => [grid_size, num_placed, phase, expected_turn, pad(16)]
+
+    movup.2 eq.PHASE_ACTIVE assert.err=ERR_ENTER_REVEAL_WRONG_PHASE
+    # => [grid_size, num_placed, expected_turn, pad(16)]
+
+    push.PHASE_REVEAL movdn.2
+    # => [grid_size, num_placed, PHASE_REVEAL, expected_turn, pad(16)]
+
+    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
+    # => [pad(16)]
+
+    exec.sys::truncate_stack
+    # => [pad(16)]
+end
+
+#! Marks that this account has sent its reveal note. Completes the game if the opponent's reveal
+#! was already verified.
+#!
+#! Inputs:  [pad(16)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the game is not in the REVEAL phase.
+#!
+#! Invocation: call
+@account_procedure
+pub proc mark_my_reveal()
+    exec.get_phase eq.PHASE_REVEAL assert.err=ERR_MARK_REVEAL_WRONG_PHASE
+    # => [pad(16)]
+
+    push.REVEAL_STATUS_SLOT[0..2] exec.active_account::get_item
+    # => [my_revealed, opponent_verified, 0, 0, pad(16)]
+
+    drop push.1 dup.1 movdn.4
+    # => [1, opponent_verified, 0, 0, opponent_verified, pad(16)]
+
+    push.REVEAL_STATUS_SLOT[0..2] exec.native_account::set_item dropw
+    # => [opponent_verified, pad(16)]
+
+    eq.1
+    if.true
+        exec.set_complete_phase
+    end
+    # => [pad(16)]
+
+    exec.sys::truncate_stack
+    # => [pad(16)]
+end
+
+#! Verifies the opponent's revealed board commitment against the stored opponent commitment and
+#! marks the opponent as verified. Completes the game if this account has already revealed.
+#!
+#! Inputs:  [COMMITMENT, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the active note's sender is not the stored opponent.
+#! - the game is not in the REVEAL phase.
+#! - COMMITMENT does not match the stored opponent commitment.
+#!
+#! Invocation: call
+@account_procedure
+pub proc verify_opponent_reveal(commitment: word)
+    exec.assert_sender_is_opponent
+    # => [COMMITMENT, pad(12)]
+
+    exec.get_phase eq.PHASE_REVEAL assert.err=ERR_VERIFY_REVEAL_WRONG_PHASE
+    # => [COMMITMENT, pad(12)]
+
+    push.OPPONENT_COMMITMENT_SLOT[0..2] exec.active_account::get_item
+    # => [STORED_COMMITMENT, COMMITMENT, pad(12)]
+
+    assert_eqw.err=ERR_REVEAL_COMMITMENT_MISMATCH
+    # => [pad(16)]
+
+    push.REVEAL_STATUS_SLOT[0..2] exec.active_account::get_item
+    # => [my_revealed, opponent_verified, 0, 0, pad(16)]
+
+    swap drop push.1 swap dup movdn.4
+    # => [my_revealed, 1, 0, 0, my_revealed, pad(16)]
+
+    push.REVEAL_STATUS_SLOT[0..2] exec.native_account::set_item dropw
+    # => [my_revealed, pad(16)]
+
+    eq.1
+    if.true
+        exec.set_complete_phase
+    end
+    # => [pad(16)]
+
+    exec.sys::truncate_stack
+    # => [pad(16)]
+end
+
+# HELPER PROCEDURES
+# =================================================================================================
+
+#! Returns the game_config word.
+#!
+#! Inputs:  []
+#! Outputs: [grid_size, num_placed, phase, expected_turn]
+#!
+#! Invocation: exec
+proc get_game_config() -> word
+    push.GAME_CONFIG_SLOT[0..2] exec.active_account::get_item
+    # => [grid_size, num_placed, phase, expected_turn]
+end
+
+#! Returns the current game phase.
+#!
+#! Inputs:  []
+#! Outputs: [phase]
+#!
+#! Invocation: exec
+proc get_phase() -> u8
+    exec.get_game_config
+    # => [grid_size, num_placed, phase, expected_turn]
+
+    drop drop swap drop
+    # => [phase]
+end
+
+#! Sets game_config to [GRID_SIZE, TOTAL_SHIP_CELLS, PHASE_ACTIVE, expected_turn].
+#!
+#! Inputs:  [expected_turn]
+#! Outputs: []
+#!
+#! Invocation: exec
+proc set_active_phase(expected_turn: felt)
+    push.PHASE_ACTIVE push.TOTAL_SHIP_CELLS push.GRID_SIZE
+    # => [GRID_SIZE, TOTAL_SHIP_CELLS, PHASE_ACTIVE, expected_turn]
+
+    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
+    # => []
+end
+
+#! Sets the phase in game_config to PHASE_COMPLETE, keeping the other fields.
+#!
+#! Inputs:  []
+#! Outputs: []
+#!
+#! Invocation: exec
+proc set_complete_phase()
+    exec.get_game_config
+    # => [grid_size, num_placed, phase, expected_turn]
+
+    movup.2 drop push.PHASE_COMPLETE movdn.2
+    # => [grid_size, num_placed, PHASE_COMPLETE, expected_turn]
+
+    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
+    # => []
+end
+
+#! Runs the checks shared by accept_challenge and receive_acceptance and stores the opponent's
+#! board commitment.
+#!
+#! Inputs:  [GAME_ID, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the active note's sender is not the stored opponent.
+#! - the game is not in the CHALLENGED phase.
+#! - GAME_ID does not match the stored game id.
+#! - the opponent id does not match the stored opponent.
+#!
+#! Invocation: exec
+proc apply_handshake(game_id: word, opponent_id: AccountId, opponent_commitment: word)
+    exec.assert_sender_is_opponent
+    # => [GAME_ID, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+
+    exec.get_phase eq.PHASE_CHALLENGED assert.err=ERR_HANDSHAKE_WRONG_PHASE
+    # => [GAME_ID, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+
+    push.GAME_ID_SLOT[0..2] exec.active_account::get_item
+    # => [STORED_GAME_ID, GAME_ID, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+
+    assert_eqw.err=ERR_HANDSHAKE_GAME_ID_MISMATCH
+    # => [opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    # => [stored_prefix, stored_suffix, ships_hit_count, total_shots_received, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+
+    movup.2 drop movup.2 drop
+    # => [stored_prefix, stored_suffix, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+
+    movup.3 assert_eq.err=ERR_HANDSHAKE_OPPONENT_PREFIX_MISMATCH
+    # => [stored_suffix, opponent_id_suffix, OPPONENT_COMMITMENT, pad(6)]
+
+    assert_eq.err=ERR_HANDSHAKE_OPPONENT_SUFFIX_MISMATCH
+    # => [OPPONENT_COMMITMENT, pad(6)]
+
+    push.OPPONENT_COMMITMENT_SLOT[0..2] exec.native_account::set_item dropw
+    # => [pad(16)]
+end
+
+#! Asserts that the active note's sender is the stored opponent.
+#!
+#! Inputs:  []
+#! Outputs: []
+#!
+#! Panics if:
+#! - the sender prefix or suffix differs from the stored opponent.
+#!
+#! Invocation: exec
+proc assert_sender_is_opponent()
+    exec.active_note::get_sender
+    # => [sender_suffix, sender_prefix]
+
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    # => [opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received, sender_suffix, sender_prefix]
+
+    movup.2 drop movup.2 drop
+    # => [opponent_prefix, opponent_suffix, sender_suffix, sender_prefix]
+
+    movup.3 assert_eq.err=ERR_SENDER_PREFIX_MISMATCH
+    # => [opponent_suffix, sender_suffix]
+
+    assert_eq.err=ERR_SENDER_SUFFIX_MISMATCH
+    # => []
+end
+
+#! Asserts that row and col are u32 values below GRID_SIZE.
+#!
+#! Inputs:  [row, col]
+#! Outputs: [row, col]
+#!
+#! Panics if:
+#! - row or col is not a u32 below GRID_SIZE.
+#!
+#! Invocation: exec
+proc assert_in_bounds(row: u32, col: u32) -> (u32, u32)
+    u32assert2.err=ERR_ROW_OUT_OF_BOUNDS
+    dup push.GRID_SIZE u32lt assert.err=ERR_ROW_OUT_OF_BOUNDS
+    dup.1 push.GRID_SIZE u32lt assert.err=ERR_COL_OUT_OF_BOUNDS
+    # => [row, col]
+end
+
+#! Loads the packed row at the given index from the board array.
+#!
+#! Inputs:  [row]
+#! Outputs: [packed_row]
+#!
+#! Invocation: exec
+proc load_packed_row(row: u32) -> u32
+    push.BOARD_SLOT[0..2] exec.array::get
+    # => [packed_row, 0, 0, 0]
+
+    movdn.3 drop drop drop
+    # => [packed_row]
+end
+
+#! Counts the cell values of one packed row into the counters at counts_ptr (one counter per
+#! cell value 0..5).
+#!
+#! Inputs:  [counts_ptr, packed_row]
+#! Outputs: []
+#!
+#! Panics if:
+#! - a cell value is greater than MAX_SHIP_ID.
+#! - the row has bits set beyond its 10 cells.
+#!
+#! Invocation: exec
+proc count_row_cells(counts_ptr: ptr<felt>, packed_row: u32)
+    push.GRID_SIZE
+    # => [cells_left, counts_ptr, packed_row]
+
+    dup neq.0
+    while.true
+        # => [cells_left, counts_ptr, packed_row]
+        dup.2 push.CELL_MASK u32and
+        # => [cell, cells_left, counts_ptr, packed_row]
+
+        dup push.MAX_SHIP_ID u32lte assert.err=ERR_CELL_VALUE_INVALID
+        # => [cell, cells_left, counts_ptr, packed_row]
+
+        dup.2 add dup mem_load add.1 swap mem_store
+        # => [cells_left, counts_ptr, packed_row]
+
+        movup.2 u32shr.CELL_BITS movdn.2
+        # => [cells_left, counts_ptr, packed_row']
+
+        sub.1 dup neq.0
+        # => [cells_left != 0, cells_left, counts_ptr, packed_row']
+    end
+    drop drop
+    # => [packed_row']
+
+    assertz.err=ERR_ROW_HAS_EXTRA_BITS
+    # => []
+end

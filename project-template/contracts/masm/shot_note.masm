@@ -1,0 +1,71 @@
+use {NoteArgs} from miden::protocol::types
+use miden::protocol::active_note
+use battleship::account as battleship
+
+# Shot note: sent by the shooter to the defender from the shooter's game account. The defender
+# consumes it to resolve the shot; the account procedure creates the public result note.
+
+# CONSTANTS
+# =================================================================================================
+
+# Memory base at which the note storage is written by `active_note::get_bounded_storage`.
+const STORAGE_PTR = 0
+
+# Note storage layout: [row, col, turn, RESULT_SERIAL_NUM(4), RESULT_SCRIPT_ROOT(4)].
+const ROW_PTR = STORAGE_PTR
+const COL_PTR = STORAGE_PTR + 1
+const TURN_PTR = STORAGE_PTR + 2
+const RESULT_SERIAL_NUM_PTR = STORAGE_PTR + 3
+const RESULT_SCRIPT_ROOT_PTR = STORAGE_PTR + 7
+const NUM_STORAGE_ITEMS = 11
+
+# ERRORS
+# =================================================================================================
+
+const ERR_SHOT_NOTE_WRONG_NUM_STORAGE_ITEMS = "shot note must carry exactly 11 storage items"
+
+# NOTE SCRIPT
+# =================================================================================================
+
+#! Resolves the shot carried by this note on the consuming (defending) account.
+#!
+#! Inputs:  [NOTE_ARGS, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the note does not carry exactly NUM_STORAGE_ITEMS storage items.
+#! - battleship::process_shot fails to verify.
+#!
+#! Invocation: dyncall
+@note_script
+pub proc main(args: NoteArgs)
+    dropw
+    # => [pad(16)]
+
+    push.NUM_STORAGE_ITEMS push.STORAGE_PTR exec.active_note::get_bounded_storage
+    # => [num_storage_items, pad(16)]
+
+    eq.NUM_STORAGE_ITEMS assert.err=ERR_SHOT_NOTE_WRONG_NUM_STORAGE_ITEMS
+    # => [pad(16)]
+
+    # build the process_shot window [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
+    padw push.0
+    push.RESULT_SCRIPT_ROOT_PTR add.3 mem_load
+    push.RESULT_SCRIPT_ROOT_PTR add.2 mem_load
+    push.RESULT_SCRIPT_ROOT_PTR add.1 mem_load
+    push.RESULT_SCRIPT_ROOT_PTR mem_load
+    push.RESULT_SERIAL_NUM_PTR add.3 mem_load
+    push.RESULT_SERIAL_NUM_PTR add.2 mem_load
+    push.RESULT_SERIAL_NUM_PTR add.1 mem_load
+    push.RESULT_SERIAL_NUM_PTR mem_load
+    mem_load.TURN_PTR
+    mem_load.COL_PTR
+    mem_load.ROW_PTR
+    # => [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5), pad(16)]
+
+    call.battleship::process_shot
+    # => [encoded_result, pad(15), pad(16)]
+
+    dropw dropw dropw dropw
+    # => [pad(16)]
+end

@@ -1,432 +1,223 @@
-use integration::helpers::{
-    account_component_from_package, build_project_in_dir, create_testing_note_from_package,
-    AccountCreationConfig, NoteCreationConfig,
-};
+//! Failure-path MockChain tests: every rejection is matched against its MASM error message.
 
-use miden_client::{
-    auth::AuthScheme,
-    account::{
-        component::NoAuth, Account, AccountBuilder, StorageSlot, StorageSlotName,
-    },
-    note::{NoteTag, NoteType},
-    transaction::OutputNote,
-    Felt, Word,
-};
-use miden_testing::{Auth, MockChain};
-use miden_protocol::transaction::RawOutputNote;
-use std::{path::Path, sync::Arc};
+mod common;
 
-// ============================================================================
-// Shared helpers
-// ============================================================================
+use anyhow::Result;
+use common::*;
+use integration::battleship::*;
 
-fn board_row_slot(n: u32) -> StorageSlotName {
-    let name = match n {
-        0 => "miden_battleship_account::battleship_account::board_row_0",
-        1 => "miden_battleship_account::battleship_account::board_row_1",
-        2 => "miden_battleship_account::battleship_account::board_row_2",
-        3 => "miden_battleship_account::battleship_account::board_row_3",
-        4 => "miden_battleship_account::battleship_account::board_row_4",
-        5 => "miden_battleship_account::battleship_account::board_row_5",
-        6 => "miden_battleship_account::battleship_account::board_row_6",
-        7 => "miden_battleship_account::battleship_account::board_row_7",
-        8 => "miden_battleship_account::battleship_account::board_row_8",
-        9 => "miden_battleship_account::battleship_account::board_row_9",
-        _ => panic!("invalid board row"),
-    };
-    StorageSlotName::new(name).unwrap()
-}
-fn game_config_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::game_config").unwrap()
-}
-fn opponent_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::opponent").unwrap()
-}
-fn board_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::board_commitment").unwrap()
-}
-fn opponent_commitment_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::opponent_commitment").unwrap()
-}
-fn game_id_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::game_id").unwrap()
-}
-fn reveal_status_slot() -> StorageSlotName {
-    StorageSlotName::new("miden_battleship_account::battleship_account::reveal_status").unwrap()
+#[tokio::test]
+async fn setup_rejects_wrong_ship_count() -> Result<()> {
+    let mut game = Game::new()?;
+    let mut cells = classic_ship_cells();
+    cells.pop();
+    let result = game
+        .setup_with_rows(game.a, game.b, A_COMMITMENT, pack_board(&cells))
+        .await;
+    assert_masm_error(result, "board must contain exactly 17 ship cells");
+    Ok(())
 }
 
-fn all_storage_slots() -> Vec<StorageSlot> {
-    let mut slots = vec![
-        StorageSlot::with_value(game_config_slot(), Word::default()),
-        StorageSlot::with_value(opponent_slot(), Word::default()),
-        StorageSlot::with_value(board_commitment_slot(), Word::default()),
-        StorageSlot::with_value(opponent_commitment_slot(), Word::default()),
-        StorageSlot::with_value(game_id_slot(), Word::default()),
-        StorageSlot::with_value(reveal_status_slot(), Word::default()),
-    ];
-    for i in 0..10u32 {
-        slots.push(StorageSlot::with_value(board_row_slot(i), Word::default()));
+#[tokio::test]
+async fn setup_rejects_wrong_ship_sizes() -> Result<()> {
+    let mut game = Game::new()?;
+    // 17 cells, but the carrier has 6 cells and the destroyer 1
+    let mut cells = classic_ship_cells();
+    cells.retain(|(r, c, _)| !(*r == 4 && *c == 1));
+    cells.push((0, 5, 1));
+    let result = game
+        .setup_with_rows(game.a, game.b, A_COMMITMENT, pack_board(&cells))
+        .await;
+    assert_masm_error(result, "ship 5 (destroyer) must occupy 2 cells");
+    Ok(())
+}
+
+#[tokio::test]
+async fn setup_rejects_invalid_cell_value() -> Result<()> {
+    let mut game = Game::new()?;
+    let mut rows = pack_board(&classic_ship_cells());
+    rows[9] = 6; // cell (9, 0) = 6 is not a ship id
+    let result = game
+        .setup_with_rows(game.a, game.b, A_COMMITMENT, rows)
+        .await;
+    assert_masm_error(
+        result,
+        "board cell value must be water or a ship id in 1..5",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn setup_rejects_second_setup() -> Result<()> {
+    let mut game = Game::new()?;
+    game.setup(game.a, game.b, A_COMMITMENT).await?;
+    let result = game.setup(game.a, game.b, A_COMMITMENT).await;
+    assert_masm_error(result, "set_board_rows requires the CREATED phase");
+    Ok(())
+}
+
+#[tokio::test]
+async fn challenge_rejected_before_setup() -> Result<()> {
+    let mut game = Game::new()?;
+    game.setup(game.a, game.b, A_COMMITMENT).await?;
+    let challenge = game.challenge_note()?;
+    game.publish(game.a, challenge.clone()).await?;
+    // B never ran its setup: the stored opponent is zero, so the sender check fails first
+    let result = game.consume(game.b, &challenge).await;
+    assert_masm_error(
+        result,
+        "note sender prefix does not match the stored opponent",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn challenge_rejected_with_wrong_game_id() -> Result<()> {
+    let mut game = Game::new()?;
+    game.setup(game.a, game.b, A_COMMITMENT).await?;
+    game.setup(game.b, game.a, B_COMMITMENT).await?;
+    let note = make_game_note(
+        game.scripts.challenge_note.clone(),
+        game.a,
+        game.b,
+        handshake_storage(word([1, 1, 1, 1]), game.a, word(A_COMMITMENT)),
+        serial(77),
+    )?;
+    game.publish(game.a, note.clone()).await?;
+    let result = game.consume(game.b, &note).await;
+    assert_masm_error(
+        result,
+        "handshake game id does not match the stored game id",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn accept_rejected_twice() -> Result<()> {
+    let mut game = Game::new()?;
+    game.handshake().await?;
+    let accept = game.accept_note()?;
+    game.publish(game.b, accept.clone()).await?;
+    let result = game.consume(game.a, &accept).await;
+    assert_masm_error(result, "handshake requires the CHALLENGED phase");
+    Ok(())
+}
+
+#[tokio::test]
+async fn shot_rejected_from_stranger() -> Result<()> {
+    let mut game = Game::new()?;
+    game.handshake().await?;
+    let shot = game.shot_note(game.c, game.b, 0, 0, 1)?;
+    game.publish(game.c, shot.clone()).await?;
+    let result = game.consume_shot(game.b, &shot).await;
+    assert_masm_error(
+        result,
+        "note sender prefix does not match the stored opponent",
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn shot_rejected_in_challenged_phase() -> Result<()> {
+    let mut game = Game::new()?;
+    game.setup(game.a, game.b, A_COMMITMENT).await?;
+    game.setup(game.b, game.a, B_COMMITMENT).await?;
+    let shot = game.shot_note(game.a, game.b, 0, 0, 1)?;
+    game.publish(game.a, shot.clone()).await?;
+    let result = game.consume_shot(game.b, &shot).await;
+    assert_masm_error(result, "process_shot requires the ACTIVE phase");
+    Ok(())
+}
+
+#[tokio::test]
+async fn shot_rejected_with_wrong_turn() -> Result<()> {
+    let mut game = Game::new()?;
+    game.handshake().await?;
+    let shot = game.shot_note(game.a, game.b, 0, 0, 5)?;
+    game.publish(game.a, shot.clone()).await?;
+    let result = game.consume_shot(game.b, &shot).await;
+    assert_masm_error(result, "shot turn does not match the expected turn");
+    assert_eq!(game.state(game.b)?.total_shots_received, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn shot_rejected_out_of_bounds() -> Result<()> {
+    let mut game = Game::new()?;
+    game.handshake().await?;
+    let shot = game.shot_note(game.a, game.b, 10, 0, 1)?;
+    game.publish(game.a, shot.clone()).await?;
+    let result = game.consume_shot(game.b, &shot).await;
+    assert_masm_error(result, "row is out of bounds");
+
+    let shot = game.shot_note(game.a, game.b, 0, 10, 1)?;
+    game.publish(game.a, shot.clone()).await?;
+    let result = game.consume_shot(game.b, &shot).await;
+    assert_masm_error(result, "col is out of bounds");
+    Ok(())
+}
+
+#[tokio::test]
+async fn shot_rejected_on_already_shot_cell() -> Result<()> {
+    let mut game = Game::new()?;
+    game.handshake().await?;
+    game.fire(game.a, game.b, 5, 5, 1).await?;
+    game.fire(game.b, game.a, 5, 5, 2).await?;
+    let shot = game.shot_note(game.a, game.b, 5, 5, 3)?;
+    game.publish(game.a, shot.clone()).await?;
+    let result = game.consume_shot(game.b, &shot).await;
+    assert_masm_error(result, "cell has already been shot");
+    Ok(())
+}
+
+#[tokio::test]
+async fn enter_reveal_rejected_in_challenged_phase() -> Result<()> {
+    let mut game = Game::new()?;
+    game.setup(game.a, game.b, A_COMMITMENT).await?;
+    let result = game
+        .run_script(game.a, game.scripts.enter_reveal_tx.clone(), None, vec![])
+        .await;
+    assert_masm_error(result, "enter_reveal requires the ACTIVE phase");
+    Ok(())
+}
+
+#[tokio::test]
+async fn mark_reveal_rejected_in_active_phase() -> Result<()> {
+    let mut game = Game::new()?;
+    game.handshake().await?;
+    let result = game
+        .run_script(game.a, game.scripts.mark_my_reveal_tx.clone(), None, vec![])
+        .await;
+    assert_masm_error(result, "mark_my_reveal requires the REVEAL phase");
+    Ok(())
+}
+
+#[tokio::test]
+async fn reveal_rejected_in_active_phase() -> Result<()> {
+    let mut game = Game::new()?;
+    game.handshake().await?;
+    let reveal = game.reveal_note(game.a, game.b, A_COMMITMENT)?;
+    game.publish(game.a, reveal.clone()).await?;
+    let result = game.consume(game.b, &reveal).await;
+    assert_masm_error(result, "verify_opponent_reveal requires the REVEAL phase");
+    Ok(())
+}
+
+#[tokio::test]
+async fn reveal_rejected_with_wrong_commitment() -> Result<()> {
+    let mut game = Game::new()?;
+    game.handshake().await?;
+    for (i, (row, col, _)) in classic_ship_cells().iter().enumerate() {
+        game.fire(game.a, game.b, *row, *col, i as u64 * 2 + 1)
+            .await?;
     }
-    slots
-}
-
-fn classic_ship_cells() -> Vec<(u64, u64, u64)> {
-    let mut cells = Vec::new();
-    for c in 0..5 { cells.push((0, c, 1)); }
-    for c in 0..4 { cells.push((1, c, 2)); }
-    for c in 0..3 { cells.push((2, c, 3)); }
-    for c in 0..3 { cells.push((3, c, 4)); }
-    for c in 0..2 { cells.push((4, c, 5)); }
-    cells
-}
-
-fn pack_board(ship_cells: &[(u64, u64, u64)]) -> [u64; 10] {
-    let mut rows = [0u64; 10];
-    for (r, c, ship_id) in ship_cells {
-        let shift = c * 3;
-        rows[*r as usize] |= ship_id << shift;
-    }
-    rows
-}
-
-fn build_setup_inputs(
-    game_id: Word, opp_prefix: u64, opp_suffix: u64,
-    commitment: Word, ship_cells: &[(u64, u64, u64)],
-) -> Vec<Felt> {
-    let mut inputs = Vec::new();
-    for f in game_id.iter() { inputs.push(*f); }
-    inputs.push(Felt::new(opp_prefix));
-    inputs.push(Felt::new(opp_suffix));
-    for f in commitment.iter() { inputs.push(*f); }
-    let packed = pack_board(ship_cells);
-    for row_val in packed.iter() {
-        inputs.push(Felt::new(*row_val));
-    }
-    inputs
-}
-
-struct Packages {
-    contract: Arc<miden_mast_package::Package>,
-    setup_note: Arc<miden_mast_package::Package>,
-    action_note: Arc<miden_mast_package::Package>,
-    shot_test_note: Arc<miden_mast_package::Package>,
-}
-
-fn build_packages() -> anyhow::Result<Packages> {
-    Ok(Packages {
-        contract: Arc::new(build_project_in_dir(Path::new("../contracts/battleship-account"), true)?),
-        setup_note: Arc::new(build_project_in_dir(Path::new("../contracts/setup-note"), true)?),
-        action_note: Arc::new(build_project_in_dir(Path::new("../contracts/action-note"), true)?),
-        shot_test_note: Arc::new(build_project_in_dir(Path::new("../contracts/shot-test-note"), true)?),
-    })
-}
-
-async fn create_game_account_with_seed(
-    pkg: Arc<miden_mast_package::Package>,
-    seed: [u8; 32],
-) -> anyhow::Result<Account> {
-    let config = AccountCreationConfig {
-        storage_slots: all_storage_slots(),
-        ..Default::default()
-    };
-    let component = account_component_from_package(pkg, &config)?;
-    let account = AccountBuilder::new(seed)
-        .account_type(config.account_type)
-        .storage_mode(config.storage_mode)
-        .with_component(component)
-        .with_auth_component(NoAuth)
-        .build_existing()?;
-    Ok(account)
-}
-
-async fn execute_note_on_account(
-    mock_chain: &mut MockChain,
-    account: &mut Account,
-    note: miden_client::note::Note,
-) -> anyhow::Result<()> {
-    let tx_context = mock_chain
-        .build_tx_context(account.id(), &[note.id()], &[])?
-        .build()?;
-    let executed = tx_context.execute().await?;
-    account.apply_delta(executed.account_delta())?;
-    mock_chain.add_pending_executed_transaction(&executed)?;
-    mock_chain.prove_next_block()?;
-    Ok(())
-}
-
-fn make_action_note(
-    pkg: &Arc<miden_mast_package::Package>,
-    sender_id: miden_client::account::AccountId,
-    inputs: Vec<Felt>,
-    tag_val: u32,
-) -> anyhow::Result<miden_client::note::Note> {
-    create_testing_note_from_package(
-        pkg.clone(), sender_id,
-        NoteCreationConfig {
-            inputs,
-            tag: NoteTag::new(tag_val),
-            ..Default::default()
-        },
-    )
-}
-
-/// Create an ACTIVE account ready for shot processing.
-/// Returns (account, notes_to_execute) where notes_to_execute are setup + accept.
-async fn create_active_account(
-    pkgs: &Packages,
-    builder: &mut miden_testing::MockChainBuilder,
-    sender_id: miden_client::account::AccountId,
-    seed: [u8; 32],
-    tag_base: u32,
-) -> anyhow::Result<(Account, Vec<miden_client::note::Note>)> {
-    let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
-    let commitment = Word::from([Felt::new(100), Felt::new(200), Felt::new(300), Felt::new(400)]);
-    let opp_commitment = Word::from([Felt::new(500), Felt::new(600), Felt::new(700), Felt::new(800)]);
-
-    let account = create_game_account_with_seed(pkgs.contract.clone(), seed).await?;
-
-    let setup_inputs = build_setup_inputs(game_id, 42, 43, commitment, &classic_ship_cells());
-    let setup_note = create_testing_note_from_package(
-        pkgs.setup_note.clone(), sender_id,
-        NoteCreationConfig { inputs: setup_inputs, tag: NoteTag::new(tag_base), ..Default::default() },
-    )?;
-
-    let accept_inputs = vec![
-        Felt::new(2), // action: accept_challenge
-        game_id[0], game_id[1], game_id[2], game_id[3],
-        Felt::new(42), Felt::new(43),
-        opp_commitment[0], opp_commitment[1], opp_commitment[2], opp_commitment[3],
-    ];
-    let accept_note = make_action_note(&pkgs.action_note, sender_id, accept_inputs, tag_base + 1)?;
-
-    builder.add_account(account.clone())?;
-    builder.add_output_note(RawOutputNote::Full(setup_note.clone()));
-    builder.add_output_note(RawOutputNote::Full(accept_note.clone()));
-
-    Ok((account, vec![setup_note, accept_note]))
-}
-
-/// Helper to make an account ACTIVE and ready for shots.
-async fn setup_active_account(
-    mock_chain: &mut MockChain,
-    account: &mut Account,
-    notes: Vec<miden_client::note::Note>,
-) -> anyhow::Result<()> {
-    for note in notes {
-        execute_note_on_account(mock_chain, account, note).await?;
-    }
-    Ok(())
-}
-
-// ============================================================================
-// Task 1K: Wrong turn number → rejected
-// ============================================================================
-
-#[tokio::test]
-async fn test_wrong_turn_number_rejected() -> anyhow::Result<()> {
-    let pkgs = build_packages()?;
-    let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
-
-    let (mut account, setup_notes) = create_active_account(
-        &pkgs, &mut builder, sender.id(), [1u8; 32], 100,
-    ).await?;
-
-    // Shot with wrong turn: expected is 1, send turn=5
-    let shot_note = create_testing_note_from_package(
-        pkgs.shot_test_note.clone(), sender.id(),
-        NoteCreationConfig {
-            inputs: vec![Felt::new(0), Felt::new(0), Felt::new(5)], // row=0, col=0, turn=5 (WRONG)
-            tag: NoteTag::new(200),
-            ..Default::default()
-        },
-    )?;
-    builder.add_output_note(RawOutputNote::Full(shot_note.clone()));
-    let mut mock_chain = builder.build()?;
-
-    setup_active_account(&mut mock_chain, &mut account, setup_notes).await?;
-
-    let result = execute_note_on_account(&mut mock_chain, &mut account, shot_note).await;
-    assert!(result.is_err(), "Shot with wrong turn should fail");
-
-    println!("test_wrong_turn_number_rejected PASSED!");
-    Ok(())
-}
-
-// ============================================================================
-// Task 1L: Same cell shot twice → rejected
-// ============================================================================
-
-#[tokio::test]
-async fn test_duplicate_cell_rejected() -> anyhow::Result<()> {
-    let pkgs = build_packages()?;
-    let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
-
-    let (mut account, setup_notes) = create_active_account(
-        &pkgs, &mut builder, sender.id(), [1u8; 32], 100,
-    ).await?;
-
-    // First shot at (5,5) turn=1 → miss
-    let shot1 = create_testing_note_from_package(
-        pkgs.shot_test_note.clone(), sender.id(),
-        NoteCreationConfig {
-            inputs: vec![Felt::new(5), Felt::new(5), Felt::new(1)],
-            tag: NoteTag::new(200),
-            ..Default::default()
-        },
-    )?;
-    // Second shot at same cell (5,5) turn=3
-    let shot2 = create_testing_note_from_package(
-        pkgs.shot_test_note.clone(), sender.id(),
-        NoteCreationConfig {
-            inputs: vec![Felt::new(5), Felt::new(5), Felt::new(3)],
-            tag: NoteTag::new(201),
-            ..Default::default()
-        },
-    )?;
-    builder.add_output_note(RawOutputNote::Full(shot1.clone()));
-    builder.add_output_note(RawOutputNote::Full(shot2.clone()));
-    let mut mock_chain = builder.build()?;
-
-    setup_active_account(&mut mock_chain, &mut account, setup_notes).await?;
-
-    // First shot succeeds
-    execute_note_on_account(&mut mock_chain, &mut account, shot1).await?;
-
-    // Second shot at same cell should fail
-    let result = execute_note_on_account(&mut mock_chain, &mut account, shot2).await;
-    assert!(result.is_err(), "Duplicate cell shot should fail");
-
-    println!("test_duplicate_cell_rejected PASSED!");
-    Ok(())
-}
-
-// ============================================================================
-// Task 1M: Shot during wrong phase → rejected
-// ============================================================================
-
-#[tokio::test]
-async fn test_shot_wrong_phase_rejected() -> anyhow::Result<()> {
-    let pkgs = build_packages()?;
-    let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
-
-    // Account in CHALLENGED phase (not ACTIVE)
-    let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
-    let commitment = Word::from([Felt::new(100), Felt::new(200), Felt::new(300), Felt::new(400)]);
-    let mut account = create_game_account_with_seed(pkgs.contract.clone(), [1u8; 32]).await?;
-
-    let setup_inputs = build_setup_inputs(game_id, 42, 43, commitment, &classic_ship_cells());
-    let setup_note = create_testing_note_from_package(
-        pkgs.setup_note.clone(), sender.id(),
-        NoteCreationConfig { inputs: setup_inputs, tag: NoteTag::new(100), ..Default::default() },
-    )?;
-
-    // Shot note during CHALLENGED phase
-    let shot_note = create_testing_note_from_package(
-        pkgs.shot_test_note.clone(), sender.id(),
-        NoteCreationConfig {
-            inputs: vec![Felt::new(0), Felt::new(0), Felt::new(1)],
-            tag: NoteTag::new(200),
-            ..Default::default()
-        },
-    )?;
-
-    builder.add_account(account.clone())?;
-    builder.add_output_note(RawOutputNote::Full(setup_note.clone()));
-    builder.add_output_note(RawOutputNote::Full(shot_note.clone()));
-    let mut mock_chain = builder.build()?;
-
-    // Setup board → CHALLENGED
-    execute_note_on_account(&mut mock_chain, &mut account, setup_note).await?;
-    assert_eq!(account.storage().get_item(&game_config_slot()).unwrap()[2], Felt::new(1));
-
-    // Shot during CHALLENGED should fail
-    let result = execute_note_on_account(&mut mock_chain, &mut account, shot_note).await;
-    assert!(result.is_err(), "Shot during CHALLENGED phase should fail");
-
-    println!("test_shot_wrong_phase_rejected PASSED!");
-    Ok(())
-}
-
-// ============================================================================
-// Task 1M (cont): Enter reveal during wrong phase → rejected
-// ============================================================================
-
-#[tokio::test]
-async fn test_enter_reveal_wrong_phase_rejected() -> anyhow::Result<()> {
-    let pkgs = build_packages()?;
-    let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
-
-    // Account in CHALLENGED phase
-    let game_id = Word::from([Felt::new(1), Felt::new(2), Felt::new(3), Felt::new(4)]);
-    let commitment = Word::from([Felt::new(100), Felt::new(200), Felt::new(300), Felt::new(400)]);
-    let mut account = create_game_account_with_seed(pkgs.contract.clone(), [1u8; 32]).await?;
-
-    let setup_inputs = build_setup_inputs(game_id, 42, 43, commitment, &classic_ship_cells());
-    let setup_note = create_testing_note_from_package(
-        pkgs.setup_note.clone(), sender.id(),
-        NoteCreationConfig { inputs: setup_inputs, tag: NoteTag::new(100), ..Default::default() },
-    )?;
-
-    let enter_reveal = make_action_note(&pkgs.action_note, sender.id(), vec![Felt::new(4)], 200)?;
-
-    builder.add_account(account.clone())?;
-    builder.add_output_note(RawOutputNote::Full(setup_note.clone()));
-    builder.add_output_note(RawOutputNote::Full(enter_reveal.clone()));
-    let mut mock_chain = builder.build()?;
-
-    execute_note_on_account(&mut mock_chain, &mut account, setup_note).await?;
-
-    // Enter reveal during CHALLENGED should fail
-    let result = execute_note_on_account(&mut mock_chain, &mut account, enter_reveal).await;
-    assert!(result.is_err(), "enter_reveal during CHALLENGED should fail");
-
-    println!("test_enter_reveal_wrong_phase_rejected PASSED!");
-    Ok(())
-}
-
-// ============================================================================
-// Task 1N (partial): Wrong commitment in reveal → rejected
-// ============================================================================
-
-#[tokio::test]
-async fn test_wrong_commitment_reveal_rejected() -> anyhow::Result<()> {
-    let pkgs = build_packages()?;
-    let mut builder = MockChain::builder();
-    let sender = builder.add_existing_wallet(Auth::BasicAuth { auth_scheme: AuthScheme::Falcon512Poseidon2 })?;
-
-    let (mut account, setup_notes) = create_active_account(
-        &pkgs, &mut builder, sender.id(), [1u8; 32], 100,
-    ).await?;
-
-    // Enter reveal
-    let enter_reveal = make_action_note(&pkgs.action_note, sender.id(), vec![Felt::new(4), Felt::new(1)], 200)?;
-
-    // Reveal note with WRONG commitment (stored is [500,600,700,800])
-    let wrong_commitment = Word::from([Felt::new(999), Felt::new(998), Felt::new(997), Felt::new(996)]);
-    let reveal_note = create_testing_note_from_package(
-        pkgs.action_note.clone(), sender.id(),
-        NoteCreationConfig {
-            inputs: vec![Felt::new(6), wrong_commitment[0], wrong_commitment[1], wrong_commitment[2], wrong_commitment[3]],
-            tag: NoteTag::new(201),
-            ..Default::default()
-        },
-    )?;
-
-    builder.add_output_note(RawOutputNote::Full(enter_reveal.clone()));
-    builder.add_output_note(RawOutputNote::Full(reveal_note.clone()));
-    let mut mock_chain = builder.build()?;
-
-    setup_active_account(&mut mock_chain, &mut account, setup_notes).await?;
-    execute_note_on_account(&mut mock_chain, &mut account, enter_reveal).await?;
-
-    // Wrong commitment should fail
-    let result = execute_note_on_account(&mut mock_chain, &mut account, reveal_note).await;
-    assert!(result.is_err(), "Wrong commitment reveal should fail");
-
-    println!("test_wrong_commitment_reveal_rejected PASSED!");
+    let reveal = game.reveal_note(game.a, game.b, [999, 998, 997, 996])?;
+    game.publish(game.a, reveal.clone()).await?;
+    let result = game.consume(game.b, &reveal).await;
+    assert_masm_error(
+        result,
+        "revealed commitment does not match the stored opponent commitment",
+    );
+    assert_eq!(game.state(game.b)?.opponent_verified, 0);
     Ok(())
 }

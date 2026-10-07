@@ -1,0 +1,21 @@
+use {NoteArgs} from miden::protocol::types
+
+# Result note: created by the defender's account while it resolves a shot. It carries the result
+# to the shooter as public data: storage = [shooter_prefix, shooter_suffix, turn, encoded_result]
+# where encoded_result = is_hit * 2 + game_over. The shooter reads it during sync; consuming it
+# only removes the note and has no effect on the consuming account.
+
+# NOTE SCRIPT
+# =================================================================================================
+
+#! Does nothing: the note is a data carrier.
+#!
+#! Inputs:  [NOTE_ARGS, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Invocation: dyncall
+@note_script
+pub proc main(args: NoteArgs)
+    dropw
+    # => [pad(16)]
+end

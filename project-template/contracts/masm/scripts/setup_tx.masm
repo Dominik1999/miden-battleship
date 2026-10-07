@@ -1,0 +1,119 @@
+use miden::core::mem
+use battleship::account as battleship
+
+# Setup transaction script: runs on the player's own game account and performs the whole board
+# setup in one transaction (set_board_rows + finalize_board).
+#
+# The script receives an advice-map key as TX_SCRIPT_ARGS and loads the payload from the advice map
+# under that key, so a single script root covers every board. The key is chosen by the account
+# owner, who also provides the payload, so no preimage check is needed (the Rust side uses the
+# payload's sequential hash, the frontend a random word).
+#
+# Payload (20 felts, 5 words):
+#   [0..4)   GAME_ID
+#   [4]      opponent_prefix
+#   [5]      opponent_suffix
+#   [6..10)  COMMITMENT (this player's salted board commitment)
+#   [10..20) packed board rows 0..9 (10 cells x 3 bits each)
+#
+
+# CONSTANTS
+# =================================================================================================
+
+# Memory address at which the payload is written; must be word-aligned.
+const PAYLOAD_ADDR = 0
+const PAYLOAD_NUM_ITEMS = 20
+const PAYLOAD_NUM_WORDS = 5
+
+const GAME_ID_PTR = PAYLOAD_ADDR
+const OPPONENT_PREFIX_PTR = PAYLOAD_ADDR + 4
+const OPPONENT_SUFFIX_PTR = PAYLOAD_ADDR + 5
+const COMMITMENT_PTR = PAYLOAD_ADDR + 6
+const ROWS_PTR = PAYLOAD_ADDR + 10
+
+# ERRORS
+# =================================================================================================
+
+const ERR_SETUP_PAYLOAD_LENGTH_INVALID = "setup payload length advice input is not a valid u32"
+const ERR_SETUP_PAYLOAD_WRONG_LENGTH = "setup payload must contain exactly 20 elements"
+
+# TRANSACTION SCRIPT
+# =================================================================================================
+
+#! Sets up the board described by the advice-provided payload on the native account.
+#!
+#! Inputs:
+#!   Operand stack: [PAYLOAD_KEY, pad(12)]
+#!   Advice map: { PAYLOAD_KEY: [payload] }
+#! Outputs:
+#!   Operand stack: [pad(16)]
+#!
+#! Panics if:
+#! - the advice map has no entry for PAYLOAD_KEY.
+#! - the payload does not contain exactly 20 elements.
+#! - battleship::set_board_rows or battleship::finalize_board fails to verify.
+#!
+#! Invocation: dyncall
+@transaction_script
+pub proc main(payload_key: word)
+    # push the payload from the advice map onto the advice stack, together with its length
+    adv.push_mapvaln
+    # OS => [PAYLOAD_KEY, pad(12)]
+    # AS => [num_elements, [payload]]
+
+    adv_push u32assert.err=ERR_SETUP_PAYLOAD_LENGTH_INVALID
+    # => [num_elements, PAYLOAD_KEY, pad(12)]
+
+    eq.PAYLOAD_NUM_ITEMS assert.err=ERR_SETUP_PAYLOAD_WRONG_LENGTH dropw
+    # => [pad(12)]
+
+    # pipe the payload to memory (the hasher state it returns is not needed)
+    push.PAYLOAD_ADDR push.PAYLOAD_NUM_WORDS
+    # => [num_words, write_ptr, pad(12)]
+
+    exec.mem::pipe_words_to_memory
+    # => [R0, R1, C, write_ptr', pad(12)]
+
+    dropw dropw dropw drop
+    # => [pad(16)]
+
+    # set_board_rows window [ROWS_A, ROWS_B, ROWS_C, pad(4)]
+    padw push.0.0
+    push.ROWS_PTR add.9 mem_load
+    push.ROWS_PTR add.8 mem_load
+    push.ROWS_PTR add.7 mem_load
+    push.ROWS_PTR add.6 mem_load
+    push.ROWS_PTR add.5 mem_load
+    push.ROWS_PTR add.4 mem_load
+    push.ROWS_PTR add.3 mem_load
+    push.ROWS_PTR add.2 mem_load
+    push.ROWS_PTR add.1 mem_load
+    push.ROWS_PTR mem_load
+    # => [row_0, ..., row_9, pad(6), pad(16)]
+
+    call.battleship::set_board_rows
+    # => [pad(16), pad(16)]
+
+    dropw dropw dropw dropw
+    # => [pad(16)]
+
+    # finalize_board window [GAME_ID, opponent_suffix, opponent_prefix, COMMITMENT, pad(6)]
+    padw push.0.0
+    push.COMMITMENT_PTR add.3 mem_load
+    push.COMMITMENT_PTR add.2 mem_load
+    push.COMMITMENT_PTR add.1 mem_load
+    push.COMMITMENT_PTR mem_load
+    mem_load.OPPONENT_PREFIX_PTR
+    mem_load.OPPONENT_SUFFIX_PTR
+    push.GAME_ID_PTR add.3 mem_load
+    push.GAME_ID_PTR add.2 mem_load
+    push.GAME_ID_PTR add.1 mem_load
+    push.GAME_ID_PTR mem_load
+    # => [GAME_ID, opponent_suffix, opponent_prefix, COMMITMENT, pad(6), pad(16)]
+
+    call.battleship::finalize_board
+    # => [pad(16), pad(16)]
+
+    dropw dropw dropw dropw
+    # => [pad(16)]
+end

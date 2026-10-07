@@ -1,279 +1,366 @@
-//! Interactive two-terminal battleship CLI.
+//! Interactive two-terminal battleship on Miden testnet.
 //!
-//! Usage (two separate terminals):
-//!   cargo run --bin battleship_cli --release -- --player alice --role challenger --game-id myGame1
-//!   cargo run --bin battleship_cli --release -- --player bob --role acceptor --game-id myGame1
+//! Each player runs this binary in its own terminal with its own `--player` name (SQLite store
+//! and keystore), the same `--game-id` and opposite `--role`s. Every run creates and funds a fresh
+//! game account and prints its address for the other player. The challenger fires first.
 //!
-//! Prerequisites: local Miden node running on port 57291.
-//! Both players must exchange account IDs out-of-band (printed at startup).
+//! Run: `cd project-template && cargo run --release --bin battleship_cli -- \
+//!       --player alice --role challenger --game-id demo`
 
+use std::{
+    io::{self, Write},
+    time::Duration,
+};
+
+use anyhow::{ensure, Context, Result};
+use clap::{Parser, ValueEnum};
 use integration::battleship::*;
 use integration::helpers::*;
-
-use anyhow::{bail, Context, Result};
-use clap::Parser;
 use miden_client::{
-    account::AccountId,
-    keystore::FilesystemKeyStore,
-    note::{Note, NoteStorage, NoteRecipient, NoteScript, NoteTag},
-    store::NoteFilter,
-    transaction::{OutputNote, TransactionRequestBuilder},
-    Client, Felt, Word,
+    account::{AccountId, NetworkId},
+    asset::AssetId,
+    note::{Note, NoteScript},
+    transaction::TransactionScript,
+    Felt, Word,
 };
-use std::collections::HashSet;
-use std::io::{self, Write as IoWrite};
-use std::path::Path;
-use std::time::{Duration, Instant};
+use miden_protocol::Hasher;
+
+/// Keep at least this many base units before every transaction.
+const MIN_FEE_BALANCE: u64 = 2_000;
+/// The opponent is a human in another terminal: wait up to an hour for each of their notes.
+const NOTE_TIMEOUT: Duration = Duration::from_secs(3600);
+const GRID: usize = GRID_SIZE as usize;
+
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum Role {
+    Challenger,
+    Acceptor,
+}
 
 #[derive(Parser)]
-#[command(name = "battleship", about = "Miden Battleship CLI")]
+#[command(about = "Interactive two-terminal battleship on Miden testnet")]
 struct Args {
-    /// Player name (used for keystore/store isolation)
+    /// Store/keystore name (`testnet-store-<player>.sqlite3`, `testnet-keystore-<player>/`).
     #[arg(long)]
     player: String,
-
-    /// Role: "challenger" (fires first) or "acceptor"
-    #[arg(long)]
-    role: String,
-
-    /// Shared game ID (both players must use the same)
+    /// The challenger publishes the challenge note and fires first.
+    #[arg(long, value_enum)]
+    role: Role,
+    /// Shared game identifier; both players must pass the same string.
     #[arg(long)]
     game_id: String,
-
-    /// Opponent's account ID (hex). If not provided, will prompt.
+    /// Opponent's game account (bech32). Prompted on stdin when omitted.
     #[arg(long)]
     opponent: Option<String>,
 }
 
-// ============================================================================
-// Note tag scheme — both players subscribe to all tags
-// ============================================================================
-
-const TAG_CHALLENGE: u32 = 10;
-const TAG_ACCEPT: u32 = 20;
-const TAG_SHOT_BASE: u32 = 1000; // TAG_SHOT_BASE + turn_number
-const TAG_RESULT: u32 = 40; // Used as shooter_tag in shot-note inputs
-const TAG_ACTION: u32 = 50;
-const TAG_REVEAL: u32 = 60;
-
-/// Subscribe to all game note tags so sync discovers them.
-async fn subscribe_to_game_tags(client: &mut Client<FilesystemKeyStore>) -> Result<()> {
-    // Fixed tags
-    for tag in [TAG_CHALLENGE, TAG_ACCEPT, TAG_RESULT, TAG_ACTION, TAG_REVEAL] {
-        client.add_note_tag(NoteTag::new(tag)).await.ok(); // ignore "already tracked"
-    }
-    // Shot tags for up to 34 turns (17 shots each direction)
-    for turn in 1..=34 {
-        client
-            .add_note_tag(NoteTag::new(TAG_SHOT_BASE + turn))
-            .await
-            .ok();
-    }
-    Ok(())
+struct Game {
+    client: TestnetClient,
+    scripts: BattleshipScripts,
+    fee_asset: AssetId,
+    me: AccountId,
+    opponent: AccountId,
+    game_id: Word,
+    commitment: Word,
+    ships: Vec<(u64, u64, u64)>,
+    /// Shots the opponent fired at me: (row, col, hit).
+    incoming: Vec<(u64, u64, bool)>,
+    /// Shots I fired: (row, col, hit).
+    outgoing: Vec<(u64, u64, bool)>,
 }
 
-// ============================================================================
-// Display helpers
-// ============================================================================
+impl Game {
+    async fn check_funded(&mut self) -> Result<()> {
+        ensure_funded(&mut self.client, self.me, self.fee_asset, MIN_FEE_BALANCE).await?;
+        Ok(())
+    }
 
-fn print_board(title: &str, cells: &[[char; 10]; 10]) {
-    println!("  {}", title);
-    println!("    A B C D E F G H I J");
-    for r in 0..10 {
-        print!("  {:>2}", r + 1);
-        for c in 0..10 {
-            print!(" {}", cells[r][c]);
+    async fn state(&self) -> Result<GameState> {
+        Ok(GameState::from_account(
+            &tracked_account(&self.client, self.me).await?,
+        ))
+    }
+
+    /// Publishes a game note from my account to the opponent and waits for it to commit.
+    async fn send(&mut self, script: NoteScript, storage: Vec<Felt>) -> Result<Note> {
+        let note = make_game_note(script, self.me, self.opponent, storage, random_word())?;
+        self.check_funded().await?;
+        publish_note(&mut self.client, self.me, note.clone()).await?;
+        println!("  note {} committed", note_id_hex(&note));
+        Ok(note)
+    }
+
+    /// Waits for a note with script root `root` sent by the opponent and consumes it.
+    async fn receive_and_consume(&mut self, root: Word, what: &str) -> Result<()> {
+        let opponent = self.opponent;
+        println!("  waiting for the opponent's {what} note...");
+        let note = wait_for_note(&mut self.client, NOTE_TIMEOUT, |n| {
+            from_opponent(n, root, opponent)
+        })
+        .await
+        .with_context(|| format!("waiting for the {what} note"))?;
+        println!("  consuming {what} note {}...", note_id_hex(&note));
+        self.check_funded().await?;
+        consume_notes(&mut self.client, self.me, vec![note]).await?;
+        Ok(())
+    }
+
+    async fn run_script(
+        &mut self,
+        script: TransactionScript,
+        arg: Option<Word>,
+        advice_map: Vec<(Word, Vec<Felt>)>,
+    ) -> Result<()> {
+        self.check_funded().await?;
+        run_tx_script(&mut self.client, self.me, script, arg, advice_map).await?;
+        Ok(())
+    }
+
+    async fn setup(&mut self) -> Result<()> {
+        let rows = pack_board(&self.ships);
+        let payload = build_setup_payload(self.game_id, self.opponent, self.commitment, &rows);
+        let arg = setup_payload_commitment(&payload);
+        self.run_script(
+            self.scripts.setup_tx.clone(),
+            Some(arg),
+            vec![(arg, payload)],
+        )
+        .await?;
+        let state = self.state().await?;
+        ensure!(
+            state.phase == PHASE_CHALLENGED && state.opponent_is(self.opponent),
+            "setup left the account in an unexpected state: {state:?}"
+        );
+        Ok(())
+    }
+
+    async fn handshake(&mut self, role: Role) -> Result<()> {
+        let storage = handshake_storage(self.game_id, self.me, self.commitment);
+        match role {
+            Role::Challenger => {
+                println!("  publishing the challenge note...");
+                self.send(self.scripts.challenge_note.clone(), storage)
+                    .await?;
+                let root = script_root(&self.scripts.accept_note);
+                self.receive_and_consume(root, "accept").await?;
+            }
+            Role::Acceptor => {
+                let root = script_root(&self.scripts.challenge_note);
+                self.receive_and_consume(root, "challenge").await?;
+                println!("  publishing the accept note...");
+                self.send(self.scripts.accept_note.clone(), storage).await?;
+            }
         }
-        println!();
+        let state = self.state().await?;
+        ensure!(
+            state.phase == PHASE_ACTIVE && state.opponent_commitment != Word::default(),
+            "handshake left the account in an unexpected state: {state:?}"
+        );
+        Ok(())
+    }
+
+    fn prompt_target(&self) -> Result<(u64, u64)> {
+        loop {
+            let input = prompt("  your shot (column letter + row number, e.g. B7): ")?;
+            let Some((row, col)) = parse_coordinate(&input) else {
+                println!("  invalid coordinate; use A-J and 1-10, e.g. A5 or J10");
+                continue;
+            };
+            if self.outgoing.iter().any(|(r, c, _)| *r == row && *c == col) {
+                println!("  you already fired at {}", coord_label(row, col));
+                continue;
+            }
+            return Ok((row, col));
+        }
+    }
+
+    /// My turn: publish a shot note and wait for the opponent's result note.
+    async fn fire(&mut self, turn: u64) -> Result<ShotResult> {
+        let (row, col) = self.prompt_target()?;
+        let result_serial = random_word();
+        let result_root = self.scripts.result_script_root();
+        println!("  firing at {} (turn {turn})...", coord_label(row, col));
+        let storage = shot_storage(row, col, turn, result_serial, result_root);
+        self.send(self.scripts.shot_note.clone(), storage).await?;
+        println!("  waiting for the result note...");
+        let note = wait_for_note(&mut self.client, NOTE_TIMEOUT, |n| {
+            script_root(n.script()) == result_root && n.recipient().serial_num() == result_serial
+        })
+        .await
+        .context("waiting for the result note")?;
+        let parsed = ResultNoteStorage::from_note(&note)?;
+        ensure!(
+            parsed.turn == turn,
+            "result note is for turn {}, expected {turn}",
+            parsed.turn
+        );
+        let result = parsed.result;
+        self.outgoing.push((row, col, result.is_hit));
+        let outcome = if result.is_hit { "HIT!" } else { "MISS." };
+        println!("  {outcome} at {}", coord_label(row, col));
+        if result.game_over {
+            println!("  all enemy ships are sunk!");
+        }
+        Ok(result)
+    }
+
+    /// Opponent's turn: wait for the shot note and resolve it against my board.
+    async fn defend(&mut self, turn: u64) -> Result<ShotResult> {
+        let state = self.state().await?;
+        ensure!(
+            state.expected_turn == turn,
+            "account expects incoming turn {}, the game is at turn {turn}",
+            state.expected_turn
+        );
+        let shot_root = script_root(&self.scripts.shot_note);
+        let opponent = self.opponent;
+        println!("  waiting for the opponent's shot (turn {turn})...");
+        let note = wait_for_note(&mut self.client, NOTE_TIMEOUT, |n| {
+            from_opponent(n, shot_root, opponent)
+                && ShotNoteStorage::from_note(n).is_ok_and(|s| s.turn == turn)
+        })
+        .await
+        .context("waiting for the shot note")?;
+        let shot = ShotNoteStorage::from_note(&note)?;
+        ensure!(
+            shot.result_script_root == self.scripts.result_script_root(),
+            "shot note carries an unknown result script root"
+        );
+        let same_cell = |r: u64, c: u64| r == shot.row && c == shot.col;
+        ensure!(
+            !self.incoming.iter().any(|&(r, c, _)| same_cell(r, c)),
+            "opponent fired at {} twice; the contract rejects repeated shots",
+            coord_label(shot.row, shot.col)
+        );
+        let is_hit = self.ships.iter().any(|&(r, c, _)| same_cell(r, c));
+        let hits = self.incoming.iter().filter(|(_, _, h)| *h).count() as u64 + is_hit as u64;
+        let result = ShotResult {
+            is_hit,
+            game_over: is_hit && hits == TOTAL_SHIP_CELLS,
+        };
+        let outcome = if is_hit { "HIT" } else { "MISS" };
+        println!(
+            "  opponent fires at {}: {outcome}",
+            coord_label(shot.row, shot.col)
+        );
+        let result_note = expected_result_note(
+            self.scripts.result_note.clone(),
+            self.me,
+            self.opponent,
+            turn,
+            result,
+            shot.result_serial_num,
+        )?;
+        self.check_funded().await?;
+        consume_shot_note(
+            &mut self.client,
+            self.me,
+            note,
+            result_note.recipient().clone(),
+        )
+        .await?;
+        println!("  result note {} published", note_id_hex(&result_note));
+        self.incoming.push((shot.row, shot.col, is_hit));
+        Ok(result)
+    }
+
+    /// Reveal phase: the winner enters reveal, then both reveal, mark and verify the opponent.
+    async fn reveal(&mut self, i_won: bool) -> Result<()> {
+        if i_won {
+            println!("  entering the reveal phase...");
+            self.run_script(self.scripts.enter_reveal_tx.clone(), None, vec![])
+                .await?;
+        }
+        println!("  publishing my reveal note...");
+        let storage = self.commitment.iter().copied().collect();
+        self.send(self.scripts.reveal_note.clone(), storage).await?;
+        println!("  marking my reveal...");
+        self.run_script(self.scripts.mark_my_reveal_tx.clone(), None, vec![])
+            .await?;
+        let root = script_root(&self.scripts.reveal_note);
+        self.receive_and_consume(root, "reveal").await
+    }
+
+    fn print_boards(&self) {
+        let mine = board_rows(&self.incoming, &self.ships);
+        let target = board_rows(&self.outgoing, &[]);
+        println!("\n     YOUR BOARD              TARGETING");
+        println!("     A B C D E F G H I J     A B C D E F G H I J");
+        for (r, (a, b)) in mine.iter().zip(&target).enumerate() {
+            println!("  {:>2}{a}    {:>2}{b}", r + 1, r + 1);
+        }
+        println!("  S=ship X=hit O=miss .=water/unknown");
     }
 }
 
-fn print_boards(my_board: &[[char; 10]; 10], opp_board: &[[char; 10]; 10]) {
-    println!();
-    print_board("YOUR BOARD", my_board);
-    println!();
-    print_board("OPPONENT'S BOARD", opp_board);
-    println!("  Legend: S=ship X=hit O=miss .=unknown/water");
-    println!();
+// ============================================================================
+// Helpers
+// ============================================================================
+
+fn script_root(script: &NoteScript) -> Word {
+    Word::from(script.root())
 }
 
-fn make_my_board_display(
-    ship_cells: &[(u64, u64, u64)],
-    hits_on_me: &[(usize, usize, bool)],
-) -> [[char; 10]; 10] {
-    let mut board = [['.'; 10]; 10];
-    for (r, c, _) in ship_cells {
-        board[*r as usize][*c as usize] = 'S';
-    }
-    for (r, c, is_hit) in hits_on_me {
-        board[*r][*c] = if *is_hit { 'X' } else { 'O' };
-    }
-    board
+fn from_opponent(note: &Note, root: Word, opponent: AccountId) -> bool {
+    script_root(note.script()) == root && note.metadata().sender() == opponent
 }
 
-fn make_opp_board_display(my_shots: &[(usize, usize, bool)]) -> [[char; 10]; 10] {
-    let mut board = [['.'; 10]; 10];
-    for (r, c, is_hit) in my_shots {
-        board[*r][*c] = if *is_hit { 'X' } else { 'O' };
-    }
-    board
+/// Four random field elements (a `u64 >> 1` always fits in the field).
+fn random_word() -> Word {
+    Word::from([(); 4].map(|_| felt(rand::random::<u64>() >> 1)))
 }
 
-fn parse_coordinates(input: &str) -> Option<(u64, u64)> {
-    let input = input.trim().to_uppercase();
-    if input.len() < 2 || input.len() > 3 {
-        return None;
-    }
-    let col = (input.as_bytes()[0] as u64).checked_sub(b'A' as u64)?;
-    let row: u64 = input[1..].parse::<u64>().ok()?.checked_sub(1)?;
-    if row < 10 && col < 10 {
-        Some((row, col))
-    } else {
-        None
-    }
+/// Both players derive the same game id word from the same string.
+fn game_id_word(s: &str) -> Word {
+    let felts: Vec<Felt> = s.bytes().map(|b| felt(b as u64)).collect();
+    Hasher::hash_elements(&felts)
 }
 
-fn prompt(msg: &str) -> String {
-    print!("{}", msg);
-    io::stdout().flush().unwrap();
+fn parse_account(s: &str) -> Result<AccountId> {
+    let (network, id) = AccountId::from_bech32(s.trim())
+        .map_err(|e| anyhow::anyhow!("invalid account address {s:?}: {e}"))?;
+    ensure!(
+        network == NetworkId::Testnet,
+        "account address {s:?} is not a testnet address"
+    );
+    Ok(id)
+}
+
+fn prompt(msg: &str) -> Result<String> {
+    print!("{msg}");
+    io::stdout().flush().context("flushing stdout")?;
     let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    input.trim().to_string()
+    let read = io::stdin().read_line(&mut input).context("reading stdin")?;
+    ensure!(read > 0, "stdin closed");
+    Ok(input.trim().to_string())
+}
+
+/// Parses "A5" / "j10" into (row, col): letter = column A-J, number = row 1-10.
+fn parse_coordinate(input: &str) -> Option<(u64, u64)> {
+    let input = input.trim().to_ascii_uppercase();
+    let (letter, number) = input.split_at_checked(1)?;
+    let col = (letter.as_bytes()[0] as u64).checked_sub(b'A' as u64)?;
+    let row = number.parse::<u64>().ok()?.checked_sub(1)?;
+    (row < GRID_SIZE && col < GRID_SIZE).then_some((row, col))
 }
 
 fn coord_label(row: u64, col: u64) -> String {
     format!("{}{}", (b'A' + col as u8) as char, row + 1)
 }
 
-// ============================================================================
-// Transaction helpers
-// ============================================================================
-
-async fn publish_note(
-    client: &mut Client<FilesystemKeyStore>,
-    sender_id: AccountId,
-    note: Note,
-) -> Result<()> {
-    let request = TransactionRequestBuilder::new()
-        .own_output_notes(vec![note])
-        .build()?;
-    client.submit_new_transaction(sender_id, request).await?;
-    client.sync_state().await?;
-    Ok(())
-}
-
-async fn consume_note(
-    client: &mut Client<FilesystemKeyStore>,
-    account_id: AccountId,
-    note: Note,
-) -> Result<()> {
-    let request = TransactionRequestBuilder::new()
-        .input_notes([(note, None)])
-        .build()?;
-    client.submit_new_transaction(account_id, request).await?;
-    client.sync_state().await?;
-    Ok(())
-}
-
-async fn consume_shot_note(
-    client: &mut Client<FilesystemKeyStore>,
-    account_id: AccountId,
-    shot_note: Note,
-    result_recipient: NoteRecipient,
-) -> Result<()> {
-    let request = TransactionRequestBuilder::new()
-        .input_notes([(shot_note, None)])
-        .expected_output_recipients(vec![result_recipient])
-        .build()?;
-    client.submit_new_transaction(account_id, request).await?;
-    client.sync_state().await?;
-    Ok(())
-}
-
-// ============================================================================
-// Note discovery via sync
-// ============================================================================
-
-/// Poll sync_state until a note with the given tag appears that we haven't seen before.
-/// Returns the discovered Note.
-async fn poll_for_note(
-    client: &mut Client<FilesystemKeyStore>,
-    tag: u32,
-    seen_ids: &HashSet<miden_client::note::NoteId>,
-    timeout_secs: u64,
-) -> Result<Note> {
-    let deadline = Instant::now() + Duration::from_secs(timeout_secs);
-    loop {
-        client.sync_state().await?;
-        let notes = client.get_input_notes(NoteFilter::Unspent).await?;
-        for record in notes {
-            if seen_ids.contains(&record.id()) {
-                continue;
-            }
-            if let Some(metadata) = record.metadata() {
-                if metadata.tag() == NoteTag::new(tag) {
-                    let note: Note = record
-                        .try_into()
-                        .map_err(|e| anyhow::anyhow!("InputNoteRecord→Note: {:?}", e))?;
-                    return Ok(note);
-                }
-            }
-        }
-        if Instant::now() > deadline {
-            bail!("Timeout ({}s) waiting for note with tag {}", timeout_secs, tag);
-        }
-        print!(".");
-        io::stdout().flush()?;
-        tokio::time::sleep(Duration::from_secs(3)).await;
+/// One " x x x ..." string per row: ships as S, hits as X, misses as O, the rest as '.'.
+fn board_rows(marks: &[(u64, u64, bool)], ships: &[(u64, u64, u64)]) -> Vec<String> {
+    let mut board = [['.'; GRID]; GRID];
+    for (r, c, _) in ships {
+        board[*r as usize][*c as usize] = 'S';
     }
-}
-
-/// Poll for a result-note (TAG_RESULT) that we haven't seen before.
-async fn poll_for_result_note(
-    client: &mut Client<FilesystemKeyStore>,
-    seen_ids: &HashSet<miden_client::note::NoteId>,
-    timeout_secs: u64,
-) -> Result<Note> {
-    poll_for_note(client, TAG_RESULT, seen_ids, timeout_secs).await
-}
-
-fn game_id_from_string(s: &str) -> Word {
-    // Simple hash: use first 4 bytes padded with zeros
-    let bytes = s.as_bytes();
-    Word::from([
-        Felt::new(bytes.first().copied().unwrap_or(0) as u64),
-        Felt::new(bytes.get(1).copied().unwrap_or(0) as u64),
-        Felt::new(bytes.get(2).copied().unwrap_or(0) as u64),
-        Felt::new(bytes.get(3).copied().unwrap_or(0) as u64),
-    ])
-}
-
-// ============================================================================
-// Shot-note input parsing
-// ============================================================================
-
-/// Extract fields from a shot-note's inputs.
-/// Input layout: [row, col, turn, serial[4], result_script_root[4], shooter_prefix, shooter_suffix, shooter_tag]
-struct ShotNoteStorage {
-    row: u64,
-    col: u64,
-    turn: u64,
-    serial: Word,
-}
-
-impl ShotNoteStorage {
-    fn from_note(note: &Note) -> Result<Self> {
-        let inputs = note.recipient().storage().items();
-        if inputs.len() < 14 {
-            bail!("Shot note has {} inputs, expected 14", inputs.len());
-        }
-        Ok(Self {
-            row: inputs[0].as_canonical_u64(),
-            col: inputs[1].as_canonical_u64(),
-            turn: inputs[2].as_canonical_u64(),
-            serial: Word::from([inputs[3], inputs[4], inputs[5], inputs[6]]),
-        })
+    for (r, c, hit) in marks {
+        board[*r as usize][*c as usize] = if *hit { 'X' } else { 'O' };
     }
+    board
+        .iter()
+        .map(|row| row.iter().map(|c| format!(" {c}")).collect())
+        .collect()
 }
 
 // ============================================================================
@@ -283,517 +370,89 @@ impl ShotNoteStorage {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    ensure!(!args.game_id.is_empty(), "--game-id must not be empty");
+    println!("=== Miden Battleship (testnet) ===");
+    let ClientSetup { mut client, .. } = setup_testnet_client(&args.player).await?;
+    client.sync_state().await.context("initial sync failed")?;
+    println!("compiling game scripts...");
+    let scripts = BattleshipScripts::compile_with(|| client.code_builder())?;
+    let fee_asset = fee_asset_id(&mut client).await?;
 
-    if args.role != "challenger" && args.role != "acceptor" {
-        bail!("Role must be 'challenger' or 'acceptor'");
-    }
-    let is_challenger = args.role == "challenger";
+    let me = create_game_account(&mut client, &scripts).await?.id();
+    println!("\nyour game account: {}", me.to_bech32(NetworkId::Testnet));
+    println!("(share this address with your opponent)\n");
+    println!("funding from the faucet (this also deploys the account)...");
+    let balance = fund_from_faucet(&mut client, me, fee_asset).await?;
+    println!("  balance {balance}");
 
-    println!("=== Miden Battleship ===");
-    println!(
-        "Player: {}, Role: {}, Game: {}",
-        args.player, args.role, args.game_id
-    );
-
-    // ── Setup client ──
-    let ClientSetup {
-        mut client,
-        keystore,
-    } = setup_local_client_for_player(&args.player).await?;
-    client.sync_state().await?;
-    println!("Connected to local node.");
-
-    // Subscribe to all game tags for note discovery
-    subscribe_to_game_tags(&mut client).await?;
-
-    // ── Build packages ──
-    println!("Building contracts...");
-    let pkgs = build_all_packages_from(Path::new("contracts"))?;
-    println!("Contracts ready.");
-
-    // ── Create accounts ──
-    let config = AccountCreationConfig {
-        storage_slots: all_storage_slots(),
-        ..Default::default()
+    let opponent = match args.opponent {
+        Some(address) => address,
+        None => prompt("opponent's game account (bech32): ")?,
     };
+    let opponent = parse_account(&opponent)?;
+    ensure!(opponent != me, "the opponent cannot be your own account");
+    let game_id = game_id_word(&args.game_id);
+    let commitment = random_word();
+    println!("game id word   {game_id}");
+    println!("my commitment  {commitment}");
 
-    let sender = create_basic_wallet_account(
-        &mut client,
-        keystore.clone(),
-        AccountCreationConfig::default(),
-    )
-    .await?;
-    let my_account = create_authenticated_game_account(
-        &mut client,
-        keystore.clone(),
-        pkgs.contract.clone(),
-        config,
-    )
-    .await?;
-
-    println!("Your account ID: {}", my_account.id().to_hex());
-    println!("(Share this with your opponent)");
-    println!();
-
-    let game_id = game_id_from_string(&args.game_id);
-    let ship_cells = classic_ship_cells();
-    let commitment =
-        Word::from([Felt::new(100), Felt::new(200), Felt::new(300), Felt::new(400)]);
-
-    // ── Get opponent ID ──
-    let opponent_hex = if let Some(opp) = args.opponent {
-        opp
-    } else {
-        prompt("Enter opponent's account ID (hex): ")
-    };
-    let opponent_id = AccountId::from_hex(&opponent_hex).context("Invalid opponent account ID")?;
-    let opp_prefix = opponent_id.prefix().as_felt();
-    let opp_suffix = opponent_id.suffix();
-
-    // ── Board setup ──
-    println!("Setting up board with classic ship placement...");
-    let setup_inputs = build_setup_inputs(
-        game_id,
-        opp_prefix.as_canonical_u64(),
-        opp_suffix.as_canonical_u64(),
-        commitment,
-        &ship_cells,
-    );
-    let setup_note = create_note_from_package(
-        &mut client,
-        pkgs.setup_note.clone(),
-        sender.id(),
-        NoteCreationConfig {
-            inputs: setup_inputs,
-            tag: NoteTag::new(1), // internal, not discovered by opponent
-            ..Default::default()
-        },
-    )?;
-    publish_note(&mut client, sender.id(), setup_note.clone()).await?;
-    consume_note(&mut client, my_account.id(), setup_note).await?;
-    println!("Board set up!");
-
-    let my_prefix = my_account.id().prefix().as_felt();
-    let my_suffix = my_account.id().suffix();
-
-    // Track all note IDs we've seen/consumed to avoid duplicates
-    let mut seen_note_ids: HashSet<miden_client::note::NoteId> = HashSet::new();
-
-    // ── Handshake ──
-    if is_challenger {
-        // A: Send challenge → wait for accept
-        println!("Sending challenge...");
-        let challenge_note = create_note_from_package(
-            &mut client,
-            pkgs.challenge_note.clone(),
-            sender.id(),
-            NoteCreationConfig {
-                inputs: vec![
-                    game_id[0],
-                    game_id[1],
-                    game_id[2],
-                    game_id[3],
-                    my_prefix,
-                    my_suffix,
-                    commitment[0],
-                    commitment[1],
-                    commitment[2],
-                    commitment[3],
-                ],
-                tag: NoteTag::new(TAG_CHALLENGE),
-                ..Default::default()
-            },
-        )?;
-        publish_note(&mut client, sender.id(), challenge_note).await?;
-        println!("Challenge sent! Waiting for opponent to accept...");
-
-        // Poll for accept-note from opponent
-        let accept_note =
-            poll_for_note(&mut client, TAG_ACCEPT, &seen_note_ids, 300).await?;
-        println!("\nAccept-note received!");
-        seen_note_ids.insert(accept_note.id());
-        consume_note(&mut client, my_account.id(), accept_note).await?;
-        println!("Game is ACTIVE! You fire first.");
-    } else {
-        // B: Wait for challenge → send accept
-        println!("Waiting for challenge from opponent...");
-        let challenge_note =
-            poll_for_note(&mut client, TAG_CHALLENGE, &seen_note_ids, 300).await?;
-        println!("\nChallenge received!");
-        seen_note_ids.insert(challenge_note.id());
-        consume_note(&mut client, my_account.id(), challenge_note).await?;
-
-        // Send accept back
-        println!("Sending accept...");
-        let accept_note = create_note_from_package(
-            &mut client,
-            pkgs.accept_note.clone(),
-            sender.id(),
-            NoteCreationConfig {
-                inputs: vec![
-                    game_id[0],
-                    game_id[1],
-                    game_id[2],
-                    game_id[3],
-                    my_prefix,
-                    my_suffix,
-                    commitment[0],
-                    commitment[1],
-                    commitment[2],
-                    commitment[3],
-                ],
-                tag: NoteTag::new(TAG_ACCEPT),
-                ..Default::default()
-            },
-        )?;
-        publish_note(&mut client, sender.id(), accept_note).await?;
-        println!("Accepted! Waiting for opponent's first shot...");
-    }
-
-    // ── Shot loop ──
-    let result_script_root = get_note_script_root(&pkgs.result_note);
-    
-    let result_script = NoteScript::from_library(&pkgs.result_note.mast).expect("from_library");
-
-    let mut my_shots: Vec<(usize, usize, bool)> = Vec::new();
-    let mut hits_on_me: Vec<(usize, usize, bool)> = Vec::new();
-    let mut my_turn_counter: u64 = if is_challenger { 1 } else { 2 };
-    let mut opp_turn_counter: u64 = if is_challenger { 2 } else { 1 };
-    let mut my_ships_hit: u64 = 0;
-    let mut opp_ships_hit: u64 = 0;
-    let mut cells_hit_on_me: HashSet<(u64, u64)> = HashSet::new();
-    let mut game_over = false;
-    let mut i_won = false;
-
-    while !game_over {
-        let my_board = make_my_board_display(&ship_cells, &hits_on_me);
-        let opp_board = make_opp_board_display(&my_shots);
-        print_boards(&my_board, &opp_board);
-
-        // Determine whose turn it is
-        // Challenger fires odd turns, acceptor fires even turns
-        let my_turn_first = is_challenger; // challenger always acts first in each round
-
-        if my_turn_first {
-            // My turn: fire
-            game_over = fire_shot(
-                &mut client,
-                &sender,
-                &my_account,
-                &pkgs,
-                &result_script_root,
-                &result_script,
-                my_prefix,
-                my_suffix,
-                my_turn_counter,
-                &mut my_shots,
-                &mut opp_ships_hit,
-                &mut seen_note_ids,
-            )
-            .await?;
-
-            if game_over {
-                i_won = true;
-                break;
-            }
-            my_turn_counter += 2;
-
-            // Opponent's turn: defend
-            game_over = defend_shot(
-                &mut client,
-                &my_account,
-                &result_script,
-                &ship_cells,
-                opp_turn_counter,
-                &mut hits_on_me,
-                &mut my_ships_hit,
-                &mut cells_hit_on_me,
-                &mut seen_note_ids,
-            )
-            .await?;
-
-            if game_over {
-                i_won = false;
-                break;
-            }
-            opp_turn_counter += 2;
-        } else {
-            // Opponent's turn first: defend
-            game_over = defend_shot(
-                &mut client,
-                &my_account,
-                &result_script,
-                &ship_cells,
-                opp_turn_counter,
-                &mut hits_on_me,
-                &mut my_ships_hit,
-                &mut cells_hit_on_me,
-                &mut seen_note_ids,
-            )
-            .await?;
-
-            if game_over {
-                i_won = false;
-                break;
-            }
-            opp_turn_counter += 2;
-
-            // Show updated board before my turn
-            let my_board = make_my_board_display(&ship_cells, &hits_on_me);
-            let opp_board = make_opp_board_display(&my_shots);
-            print_boards(&my_board, &opp_board);
-
-            // My turn: fire
-            game_over = fire_shot(
-                &mut client,
-                &sender,
-                &my_account,
-                &pkgs,
-                &result_script_root,
-                &result_script,
-                my_prefix,
-                my_suffix,
-                my_turn_counter,
-                &mut my_shots,
-                &mut opp_ships_hit,
-                &mut seen_note_ids,
-            )
-            .await?;
-
-            if game_over {
-                i_won = true;
-                break;
-            }
-            my_turn_counter += 2;
-        }
-    }
-
-    // ── Game over ──
-    println!();
-    if i_won {
-        println!("*** YOU WIN! All enemy ships sunk! ***");
-    } else {
-        println!("*** YOU LOSE! All your ships are sunk! ***");
-    }
-
-    // Show final boards
-    let my_board = make_my_board_display(&ship_cells, &hits_on_me);
-    let opp_board = make_opp_board_display(&my_shots);
-    print_boards(&my_board, &opp_board);
-
-    // ── Reveal phase ──
-    println!("Entering reveal phase...");
-    let enter_reveal = create_note_from_package(
-        &mut client,
-        pkgs.action_note.clone(),
-        sender.id(),
-        NoteCreationConfig {
-            inputs: vec![Felt::new(4), Felt::new(99)],
-            tag: NoteTag::new(TAG_ACTION),
-            ..Default::default()
-        },
-    )?;
-    publish_note(&mut client, sender.id(), enter_reveal.clone()).await?;
-    consume_note(&mut client, my_account.id(), enter_reveal).await?;
-
-    let mark_reveal = create_note_from_package(
-        &mut client,
-        pkgs.action_note.clone(),
-        sender.id(),
-        NoteCreationConfig {
-            inputs: vec![Felt::new(5), Felt::new(98)], // different input to avoid nullifier collision
-            tag: NoteTag::new(TAG_ACTION),
-            ..Default::default()
-        },
-    )?;
-    publish_note(&mut client, sender.id(), mark_reveal.clone()).await?;
-    consume_note(&mut client, my_account.id(), mark_reveal).await?;
-
-    println!("Reveal complete. Thanks for playing Miden Battleship!");
-    Ok(())
-}
-
-// ============================================================================
-// Fire a shot (my turn)
-// ============================================================================
-
-#[allow(clippy::too_many_arguments)]
-async fn fire_shot(
-    client: &mut Client<FilesystemKeyStore>,
-    sender: &miden_client::account::Account,
-    my_account: &miden_client::account::Account,
-    pkgs: &AllPackages,
-    result_script_root: &Word,
-    _result_script: &NoteScript,
-    my_prefix: Felt,
-    my_suffix: Felt,
-    turn: u64,
-    my_shots: &mut Vec<(usize, usize, bool)>,
-    opp_ships_hit: &mut u64,
-    seen_ids: &mut HashSet<miden_client::note::NoteId>,
-) -> Result<bool> {
-    // Prompt for coordinates
-    let (row, col) = loop {
-        let input = prompt(&format!(
-            "Your turn (turn {}). Enter target (e.g. A5): ",
-            turn
-        ));
-        if let Some(coords) = parse_coordinates(&input) {
-            if my_shots
-                .iter()
-                .any(|(r, c, _)| *r == coords.0 as usize && *c == coords.1 as usize)
-            {
-                println!("  Already fired there! Try again.");
-                continue;
-            }
-            break coords;
-        }
-        println!("  Invalid input. Use format like A5, B10, J1.");
-    };
-
-    println!("  Firing at {}...", coord_label(row, col));
-
-    let serial = Word::from([
-        Felt::new(5000 + turn),
-        Felt::new(0),
-        Felt::new(0),
-        Felt::new(0),
-    ]);
-    let shot_note = create_note_from_package(
+    let mut game = Game {
         client,
-        pkgs.shot_note.clone(),
-        sender.id(),
-        NoteCreationConfig {
-            inputs: vec![
-                Felt::new(row),
-                Felt::new(col),
-                Felt::new(turn),
-                serial[0],
-                serial[1],
-                serial[2],
-                serial[3],
-                result_script_root[0],
-                result_script_root[1],
-                result_script_root[2],
-                result_script_root[3],
-                my_prefix,
-                my_suffix,
-                Felt::new(TAG_RESULT as u64), // shooter_tag: result-notes get this tag
-            ],
-            tag: NoteTag::new(TAG_SHOT_BASE + turn as u32),
-            ..Default::default()
-        },
-    )?;
+        scripts,
+        fee_asset,
+        me,
+        opponent,
+        game_id,
+        commitment,
+        ships: classic_ship_cells(),
+        incoming: Vec::new(),
+        outgoing: Vec::new(),
+    };
 
-    publish_note(client, sender.id(), shot_note).await?;
-    println!("  Shot published. Waiting for result...");
+    println!("\n[setup] classic ship placement, running the setup transaction...");
+    game.setup().await?;
+    println!("\n[handshake]");
+    game.handshake(args.role).await?;
+    let challenger = args.role == Role::Challenger;
+    let first = if challenger { "you" } else { "your opponent" };
+    println!("game ACTIVE; first shot: {first}");
 
-    // Poll for result-note from opponent's defense
-    let result_note = poll_for_result_note(client, seen_ids, 120).await?;
-    seen_ids.insert(result_note.id());
-    println!();
-
-    // Read result from note inputs: [shooter_prefix, shooter_suffix, turn, encoded_result]
-    let result_inputs = result_note.recipient().storage().items();
-    if result_inputs.len() < 4 {
-        bail!("Result note has too few inputs");
-    }
-    let encoded_result = result_inputs[3].as_canonical_u64();
-    let is_hit = encoded_result >= 2; // encoded = result * 2 + game_over
-    let is_game_over = encoded_result % 2 == 1;
-
-    my_shots.push((row as usize, col as usize, is_hit));
-
-    if is_hit {
-        *opp_ships_hit += 1;
-        println!(
-            "  HIT! ({}/17 ships hit)",
-            opp_ships_hit
-        );
-    } else {
-        println!("  Miss.");
-    }
-
-    // Consume the result-note to clean up (optional but good practice)
-    // Note: result-note targets us (shooter), so we can consume it
-    let _ = consume_note(client, my_account.id(), result_note).await;
-
-    Ok(is_game_over)
-}
-
-// ============================================================================
-// Defend a shot (opponent's turn)
-// ============================================================================
-
-#[allow(clippy::too_many_arguments)]
-async fn defend_shot(
-    client: &mut Client<FilesystemKeyStore>,
-    my_account: &miden_client::account::Account,
-    result_script: &NoteScript,
-    ship_cells: &[(u64, u64, u64)],
-    expected_turn: u64,
-    hits_on_me: &mut Vec<(usize, usize, bool)>,
-    my_ships_hit: &mut u64,
-    cells_hit_on_me: &mut HashSet<(u64, u64)>,
-    seen_ids: &mut HashSet<miden_client::note::NoteId>,
-) -> Result<bool> {
-    println!(
-        "  Opponent's turn (turn {}). Waiting for incoming shot...",
-        expected_turn
-    );
-
-    // Poll for shot-note targeting our account
-    let shot_tag = TAG_SHOT_BASE + expected_turn as u32;
-    let shot_note = poll_for_note(client, shot_tag, seen_ids, 300).await?;
-    seen_ids.insert(shot_note.id());
-    println!();
-
-    // Parse shot-note inputs
-    let shot_inputs = ShotNoteStorage::from_note(&shot_note)?;
-    let row = shot_inputs.row;
-    let col = shot_inputs.col;
-    println!(
-        "  Incoming shot at {}! Processing...",
-        coord_label(row, col)
-    );
-
-    // Determine result from our board
-    let is_hit = ship_cells.iter().any(|(r, c, _)| *r == row && *c == col);
-    if is_hit && !cells_hit_on_me.contains(&(row, col)) {
-        *my_ships_hit += 1;
-        cells_hit_on_me.insert((row, col));
-    }
-    hits_on_me.push((row as usize, col as usize, is_hit));
-
-    let result: u64 = if is_hit { 1 } else { 0 };
-    let game_over: u64 = if *my_ships_hit >= 17 { 1 } else { 0 };
-    let encoded = result * 2 + game_over;
-
-    // Build expected result-note recipient
-    // Result-note inputs: [shooter_prefix, shooter_suffix, turn, encoded_result]
-    let shot_all_inputs = shot_note.recipient().storage().items();
-    let shooter_prefix = shot_all_inputs[11]; // from shot-note input layout
-    let shooter_suffix = shot_all_inputs[12];
-
-    let result_inputs =
-        NoteStorage::new(vec![shooter_prefix, shooter_suffix, Felt::new(shot_inputs.turn), Felt::new(encoded)])?;
-    let result_recipient =
-        NoteRecipient::new(shot_inputs.serial, result_script.clone(), result_inputs);
-
-    // Consume the shot-note (this creates the result-note in the VM)
-    consume_shot_note(client, my_account.id(), shot_note, result_recipient).await?;
-
-    if is_hit {
-        println!(
-            "  They HIT your ship! ({}/17)",
-            my_ships_hit
-        );
-        if game_over == 1 {
-            println!("  All your ships are sunk!");
+    let mut turn = 1;
+    let i_won = loop {
+        let my_turn = (turn % 2 == 1) == challenger;
+        game.print_boards();
+        let who = if my_turn {
+            "you fire"
+        } else {
+            "opponent fires"
+        };
+        println!("\n[turn {turn}] {who}");
+        let result = if my_turn {
+            game.fire(turn).await?
+        } else {
+            game.defend(turn).await?
+        };
+        if result.game_over {
+            break my_turn;
         }
-    } else {
-        println!("  They missed!");
-    }
+        turn += 1;
+    };
+    game.print_boards();
+    let verdict = if i_won { "YOU WIN" } else { "YOU LOSE" };
+    println!("\n*** {verdict} ***");
 
-    Ok(game_over == 1)
+    println!("\n[reveal]");
+    game.reveal(i_won).await?;
+    let state = game.state().await?;
+    let balance = fee_asset_balance(&game.client, me, fee_asset).await?;
+    println!(
+        "\nfinal phase {}; remaining fee balance {balance}",
+        state.phase_name()
+    );
+    ensure!(
+        state.phase == PHASE_COMPLETE && state.my_revealed == 1 && state.opponent_verified == 1,
+        "game did not complete: {state:?}"
+    );
+    println!("Thanks for playing Miden Battleship!");
+    Ok(())
 }
