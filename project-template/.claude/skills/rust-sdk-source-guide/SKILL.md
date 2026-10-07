@@ -27,7 +27,7 @@ Rule of thumb: if the task touches a storage layout, a note layout or a procedur
 **Test loop**: `cargo test -p integration --release`. When a test fails:
 1. Is it an assembly error, a MASM assertion (`ERR_...` message), or a harness error (fee, missing note script, note not found)?
 2. For an assertion: check the call window padding and the stack comments before suspecting the logic
-3. For a harness error: compare against `tests/common/mod.rs` (`publish`, `consume`, `consume_shot`)
+3. For a harness error: compare against `tests/common/mod.rs` (`publish`, `consume_with`, `resolve`, `answer`, `reclaim`, `claim`)
 
 **Gate**: `cargo run --bin validate_testnet --release` before any frontend work.
 

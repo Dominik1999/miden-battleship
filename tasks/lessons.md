@@ -151,3 +151,40 @@ scratchpad were lost; the API knowledge had to be re-collected.
 
 **Rule:** Write anything a restart would cost time to reproduce (API reports, run logs, decisions) under
 `tasks/research/` and keep `tasks/todo.md` current at every milestone.
+
+## Read every id you need BEFORE handing a note to the web SDK; make retried loops idempotent
+
+**Date:** 2026-10-07
+
+**Problem:** `publishStake` built a stake note, passed it to `new NoteArray([note])` (which consumes the
+handle), submitted the transaction, and only then called `note.id()` to persist the stake note id. The
+call threw `null pointer passed to rust`, the tick reported an error, the id was never saved, and the next
+tick published the stake again: eight stake notes (8000 base units) went out before the wallet ran dry and
+the real symptom surfaced as a vault-balance assertion.
+
+**Rule:** With wasm-bindgen handles, read ids/addresses first and hand copies to constructors
+(`cloneId`, `NoteArray.push`). Any loop that publishes money on a condition (`!session.myStakeNoteId`)
+must record the outcome before anything that can throw, and must log the balance it is about to spend.
+
+## The web SDK's client wrapper exposes no block header; use the wall clock with margins
+
+**Date:** 2026-10-07
+
+**Problem:** `getBlockHeaderByNumber` exists on the raw wasm `WebClient` but not on the `WasmWebClient`
+wrapper the react provider hands out, so every deadline computation failed at runtime although the
+types compiled.
+
+**Rule:** Check the wrapper's `api-types.d.ts`, not the wasm bindings, for what the app can call. Deadlines
+and forfeit checks use `Date.now()` plus `DEADLINE_MARGIN_SECONDS` / `CLAIM_MARGIN_SECONDS`.
+
+## Browser accounts must be built with `buildWithoutSchemaCommitment()` to match the Rust builder
+
+**Date:** 2026-10-07
+
+**Problem:** The handshake pins the initial storage commitment of the game account; the web SDK's
+`AccountBuilder.build()` merges a storage-schema component the Rust `AccountBuilder::build()` does not,
+so a browser account could never prove to a Rust client that it runs the same code (and vice versa).
+
+**Rule:** Build every account that must be reproducible across clients with
+`buildWithoutSchemaCommitment()` and compare the logged commitment with
+`cargo test -p integration --release --lib print_init_storage_commitment -- --nocapture`.

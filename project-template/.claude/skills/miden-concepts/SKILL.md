@@ -19,7 +19,7 @@ Key properties:
 | Traditional (Ethereum) | Miden |
 |------------------------|-------|
 | Transactions involve sender + receiver | Transactions involve **one account only** |
-| Public state by default | **Private by default** (this project uses public game accounts) |
+| Public state by default | **Private by default** (this project uses private game accounts and public wallets) |
 | Validators execute transactions | **Client executes and proves** locally |
 | Gas metering | **Fee per transaction** in the chain's fee asset, scaled by proof size |
 | Synchronous contract calls | **Asynchronous** communication via notes |
@@ -94,7 +94,7 @@ Contracts are tested locally with **MockChain** (`miden-testing`) and used on ch
 ## Key Design Decisions for App Architects
 
 1. **One account per actor** — each player in a match has its own game account
-2. **Notes for communication** — challenge/accept/shot/result/reveal notes instead of direct calls
-3. **Storage for state** — value slots for flags and counters, a storage map for the board
-4. **Public where discoverability is needed** — game notes are public and account-tagged; the board stays in private storage
+2. **Notes for communication** — challenge/accept/shot/result/defeat/forfeit/stake notes instead of direct calls; the component creates its own notes, with deadlines so a stalled note can be reclaimed
+3. **Storage for state** — value slots for flags and counters, storage maps for the board, the shot log and the pinned script roots
+4. **Public where discoverability is needed** — game notes are public and account-tagged; the game account itself is private, so the board never leaves the owner's device
 5. **Components for reuse** — `BasicWallet` + `NoAuth` beside the custom component give fee payment without keys

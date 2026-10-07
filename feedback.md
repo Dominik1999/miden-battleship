@@ -54,3 +54,20 @@ faucet-funded NoAuth game accounts.
 - One client per party, always; a shared store hides the real discovery path.
 - Classify incoming notes by script root, never by storage length (result and reveal notes both carry
   4 items).
+
+## Private boards, forfeits and stakes (2026-10-07, second phase)
+
+**What worked**
+- The spec → plan → native execution flow carried a 10-task rewrite (MASM component, 7 note scripts, Rust harness, validator, CLI, frontend) with the MockChain harness catching every contract regression before testnet.
+- The kb note on decoding bare MASM error codes paid off twice (validator and browser); `masm_error_code` now lives in the crate.
+- Playwright profiles for two players plus a stdin-fed Rust CLI gave a real cross-implementation game on testnet.
+
+**What was missing or wrong**
+- No skill mentions that the react provider's client wrapper lacks block headers, that `build()` adds a schema-commitment slot, or which SDK constructors consume handles; each cost a debugging round during the browser run.
+- The `local-node-validation` skill still assumes `miden-node bundled`; the gate is the testnet validator now.
+- Hooks under `.claude/hooks` do nothing for `.masm` edits.
+
+**Suggested improvements**
+- A `web-sdk-handles` skill: cloneId before NoteTag/NoteMetadata, push into NoteArray/NoteAssets, read ids before submit, no bigint props in dev.
+- A skill for "deadline" contracts on the web (wall clock + margins, how to verify the reference block timestamp).
+- Capture the interop check (`print_init_storage_commitment` vs the browser log) as a documented step.

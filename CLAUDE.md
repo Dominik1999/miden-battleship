@@ -41,7 +41,7 @@ Each half has its own CLAUDE.md with detailed instructions, skills for domain-sp
 **Contracts first, validate on testnet, then frontend.** Frontend work is gated on the testnet validation binary passing.
 
 1. Write or change the contracts in `project-template/contracts/masm/`
-   - One account component (`battleship_account.masm`), five note scripts, three transaction scripts under `scripts/`
+   - One account component (`battleship_account.masm`), seven note scripts (challenge, accept, shot, result, defeat, forfeit, stake), two transaction scripts under `scripts/` (setup, fire)
    - There is no build step: `BattleshipScripts::compile()` (Rust) and `ContractCompiler` (browser) assemble the sources at runtime with `CodeBuilder`
    - Quick assemble check: `cd project-template && cargo test -p integration --release --lib all_masm_compiles`
 
@@ -49,17 +49,17 @@ Each half has its own CLAUDE.md with detailed instructions, skills for domain-sp
    - Tests live in `project-template/integration/tests/`; the shared harness is `tests/common/mod.rs` (`Game`)
    - The chain charges fees (`verification_base_fee`), so the `NoAuth` fee-payment path is exercised like on testnet
    - Failure tests assert the exact MASM error message with `assert_masm_error`
-   - Exit criteria: `cargo test -p integration --release` passes (31 tests)
+   - Exit criteria: `cargo test -p integration --release` passes (30 MockChain tests + lib tests)
 
 3. Testnet validation **(GATE -- must pass before frontend)**
    - `cd project-template && cargo run --bin validate_testnet --release`
-   - Plays a full game between two independent clients (own store + keystore each), funds both accounts from the public faucet and asserts storage after every step; ~8–9 minutes
+   - Plays a full staked game between two independent clients (own store + keystore each, a private game account and a public wallet per player), funds all four accounts from the public faucet, rejects an early forfeit claim, and lets the winner's wallet claim both stakes; ~6 minutes
    - There is no local-node step: `miden-node` 0.17 has no `bundled` mode. See the `local-node-validation` skill for the testnet checklist
-   - Exit criteria: the binary prints `DONE: both accounts COMPLETE`
+   - Exit criteria: the binary prints `DONE in <n>s: full staked game validated on testnet`
 
 4. Build the frontend in `frontend-template/`
    - The MASM sources are imported with `?raw` through the `@masm` Vite alias (`../project-template/contracts/masm`); nothing is copied or deployed
-   - `src/lib/game.ts` mirrors `validate_testnet.rs` step for step; hooks and components sit on top of it
+   - `src/lib/game.ts` mirrors `integration/src/helpers.rs` step for step; `useGameplaySync` drives the one-transaction-per-move loop, `lib/session.ts` persists the session for `Resume game`
    - TDD workflow: write tests first, then implement
    - Automated hooks verify type safety and affected tests on every edit
 
@@ -94,11 +94,6 @@ cd project-template && cargo test -p integration --release --lib all_masm_compil
 cd project-template && cargo test -p integration --release
 ```
 
-**Cycle counts per transaction:**
-```
-cd project-template && cargo test -p integration --release --test cycle_benchmark_test -- --nocapture
-```
-
 **Testnet validation (full game, two clients):**
 ```
 cd project-template && cargo run --bin validate_testnet --release
@@ -106,20 +101,20 @@ cd project-template && cargo run --bin validate_testnet --release
 
 **Interactive CLI (one terminal per player):**
 ```
-cd project-template && cargo run --bin battleship_cli --release -- --player <name> --role challenger|acceptor --game-id <id> [--opponent <bech32>]
+cd project-template && cargo run --bin battleship_cli --release -- --player <name> --role challenger|acceptor --game-id <id> [--opponent <bech32>] [--stake <base units>]
 ```
 
 **Frontend:**
 ```
 cd frontend-template && yarn dev      # dev server on http://localhost:5173
-cd frontend-template && yarn test     # vitest (54 tests)
+cd frontend-template && yarn test     # vitest (76 tests)
 cd frontend-template && yarn build    # tsc -b && vite build
 cd frontend-template && yarn lint
 ```
 
 ## Fees and Funding
 
-Testnet 0.17 charges every transaction a fee in USDCx (the chain's fee asset, 6 decimals). Game accounts are public `NoAuth` accounts with a `BasicWallet`; they are funded from the public faucet HTTP API (`https://faucet-api.testnet.miden.io`: `GET /pow`, solve a SHA-256 proof of work, `GET /get_tokens`; at most 10,000 base units per claim). The first transaction of a fresh account consumes the funding P2ID note and thereby deploys the account. A transaction costs ~105 base units; a full game ~4,200 per account. The Rust helpers top up below `MIN_FEE_BALANCE`, the frontend below `FEE_TOP_UP_THRESHOLD` (`src/config.ts`).
+Testnet 0.17 charges every transaction a fee in USDCx (the chain's fee asset, 6 decimals). Game accounts are private `NoAuth` accounts with a `BasicWallet` (the player's wallet is a public `NoAuth` account on testnet); all are funded from the public faucet HTTP API (`https://faucet-api.testnet.miden.io`: `GET /pow`, solve a SHA-256 proof of work, `GET /get_tokens`; at most 10,000 base units per claim). The first transaction of a fresh account consumes the funding P2ID note and thereby deploys the account. A transaction costs ~105 base units; a game account submits 18–19 transactions per game. The Rust helpers top up below `MIN_FEE_BALANCE`, the frontend below `FEE_TOP_UP_THRESHOLD` (`src/config.ts`).
 
 ## Pitfalls
 
@@ -127,7 +122,8 @@ Testnet 0.17 charges every transaction a fee in USDCx (the chain's fee asset, 6 
 - **Setup payload key.** The setup script takes an arbitrary advice-map key as its argument (random word in the browser, the payload's sequential hash in Rust). The web SDK exposes `Poseidon2.hashElements`, so a preimage check could be restored; it was dropped because the owner supplies both key and payload.
 - **One client per player.** A client tracking both game accounts never sees a component-created note (the result note) from one account as an input note of the other. The validation binary and the CLI use one store + keystore per player; two browser profiles for the frontend.
 - **`MidenProvider` never initializes behind a disconnected signer provider.** The frontend uses no signer provider at all (`src/providers.tsx`).
-- **Cycle counts** (MockChain, `cycle_benchmark_test`): setup ~31k, shot ~18k, publish ~11k, consume handshake ~14k; all 2^14–2^15 traces. Remote proving takes tens of seconds; the clients use a 120 s (browser) / 300 s (Rust) prover timeout.
+- **Remote proving** takes tens of seconds per transaction; the clients use a 120 s (browser) / 300 s (Rust) prover timeout. The prover is trusted (it sees the board of every transaction it proves).
+- **Browser accounts use `buildWithoutSchemaCommitment()`** so their initial storage commitment equals the Rust builder's; the handshake pins it. The react client wrapper exposes no block header, so browser deadlines come from the wall clock plus margins (`src/config.ts`). `NoteArray`/`NoteAssets` are filled with `push`, ids are cloned before `NoteMetadata`/`NoteTag` (see `tasks/lessons.md`).
 
 ## Post-Project Feedback
 

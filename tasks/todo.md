@@ -1,36 +1,30 @@
-# Migrate miden-battleship to testnet 0.17 (USDCx fees)
+# Private boards, forfeits and stakes (spec: docs/superpowers/specs/2026-10-07-private-boards-and-stakes-design.md, plan: docs/superpowers/plans/2026-10-07-private-boards-and-stakes.md)
 
-Target stack (status.testnet.miden.io, 2026-10-07): node/RPC/prover 0.17.1, fee token USDCx
-(mtst1ap8xldq06tm2252qmuky9ha4kunjzkhn), faucet max 10 USDCX.
-Current: Rust-SDK contracts (miden 0.12 / cargo-miden 0.8), miden-client 0.14, web SDK 0.14.10.
-Target (per user, 2026-10-07): contracts rewritten in MASM (no Rust SDK / cargo-miden / .masp),
-compiled at runtime by miden-client 0.17.2 (MockChain tests + local-node gate stay in Rust) and by
-web SDK 0.17.1 / react 0.17.0 in the browser. Base docs/workflow on 0xMiden/agentic-template (at 0.16).
+Decisions (user, 2026-10-07): private game accounts with a seed-anchored handshake; a player who does not move for
+12 h loses by forfeit (reclaimable notes, no second signature); delegated proving with NoAuth game accounts (the prover
+is trusted); stakes as conditional notes claimed by the winner's wallet; sessions persist across reloads.
 
 ## Plan
-- [x] Research (3 subagents: MASM, rust client, web sdk) → reports in scratchpad/reports
-- [x] Install toolchain: miden-node 0.17.2 (no `bundled` mode any more; validate against testnet instead)
-- [x] Contracts: account component + 5 note scripts + 3 tx scripts in MASM under project-template/contracts/masm/ (all assemble: `cargo test -p integration --lib all_masm_compiles`)
-- [ ] Contracts: remove the old Rust SDK crates under project-template/contracts/<name>/ and public/packages/*.masp (after tests pass)
-- [x] Integration crate: bump to 0.17, lib (battleship.rs, helpers.rs) compiles
-- [x] Integration crate: tests rewritten (tests/common harness + battleship_test, battleship_failure_test, cycle_benchmark_test); 31 pass with fees on
-- [x] Integration crate: old bins removed; validate_testnet.rs written (deploy_testnet obsolete: accounts are created at runtime)
-- [x] Integration crate: battleship_cli.rs rewritten (builds, clippy clean; not yet played on testnet)
-- [x] Testnet validation: `cargo run --bin validate_testnet --release` passes (full game, 2 clients, 510 s, ~105 base units fee per tx; log in tasks/research/validate-testnet-run.log)
-- [x] Frontend loads MASM sources via `@masm/*.masm?raw` (vite alias to project-template/contracts/masm) and compiles at runtime; result script root computed at runtime
-- [x] Frontend: packages bumped to 0.17, libs rewritten (board, contracts, funding, masmSources, notes, config)
-- [x] Frontend: hooks/components rewritten on lib/game.ts (typecheck clean)
-- [x] Frontend: tests updated (54 vitest tests), tsc, eslint and production build green; wallet adapter removed (MidenProvider never initializes behind a disconnected signer; game accounts need no wallet)
-- [x] Browser test: two Playwright profiles (.mcp.json player1/player2), full game to COMPLETE on both sides (VICTORY/DEFEAT, boards revealed and verified), ~4,300 base units fees per account; screenshots in tasks/research/e2e-player{1,2}-final.png
-- [x] Update docs (README, ARCHITECTURE, CLAUDE.md x3, skills), lessons, memory, feedback.md
+- [x] Task 1: storage layout, setup and handshake with seed, wallet and roots (MASM + Rust bindings)
+- [x] Task 2: component-created shots and results (fire_shot / process_shot / process_result)
+- [x] Task 3: remove the reveal protocol
+- [x] Task 4: forfeits, defeat and forfeit notes (12-hour deadlines on shot and result notes)
+- [x] Task 5: stake note (claimed with a defeat or forfeit note, refundable after 60 days)
+- [x] Task 6: Rust clients — helpers, `validate_testnet` (passes on testnet in ~344 s: stakes, early reclaim rejected, 33 moves, claim), `battleship_cli` (--stake, forfeit claim)
+- [x] Task 7: frontend libraries (contracts with the throwaway-account storage commitment, notes, game, state, session persistence)
+- [x] Task 8: hooks and screens (one-transaction moves, forced resolutions, forfeit countdown and claim, resume from the lobby)
+- [~] Task 9: stakes via the local NoAuth wallet (publish, match, claim) — done; the browser-extension wallet adapter is NOT wired (see follow-ups)
+- [x] Task 10: two-browser staked game on testnet (Playwright, code frozen after the fixes), Rust CLI vs browser game on testnet, docs, feedback
 
-## Session notes (for restarts)
-- 2026-10-07 18:50: machine restarted mid-session; scratchpad research reports were lost. Keep research under tasks/research/ from now on.
+## Verification log
+- `cargo test -p integration --release`: 30 MockChain tests + 4 lib tests green; clippy --all-targets and nightly fmt clean.
+- `cargo run --bin validate_testnet --release`: DONE in 344 s (log: tasks/research/validate-testnet-private-stakes.log).
+- Frontend: tsc, eslint, 76 vitest tests, vite build green.
+- Browser e2e (two Playwright profiles, stake 1000 base units each): handshake, stakes locked, 17 hits / 16 misses, DEFEAT / VICTORY, winner's wallet consumed the defeat note + both stakes in one transaction; three resumes from the persisted session during the run.
+- Interop: `battleship_cli --role challenger --stake 0` (Rust) vs the browser as host: handshake verified the seed/roots across implementations, 17 hits, CLI "YOU WIN", browser "DEFEAT". Requires `buildWithoutSchemaCommitment()` in the browser (the initial storage commitment now matches Rust's).
 
-## Review
-- Contracts: 845-line MASM account component + 5 note scripts + 3 tx scripts; shot tx ~18k cycles (2^15), down from ~169k.
-- Rust: 31 MockChain tests on a fee-charging chain; `validate_testnet` full game between two clients (510 s); CLI rewritten.
-- Frontend: runtime MASM compilation, faucet-funded NoAuth accounts, no wallet adapter, state-derived handshake, auto reveal protocol; 54 vitest tests, tsc/eslint/build green.
-- Gates passed: MockChain, testnet validator, two-browser game on testnet.
-- Bugs found and fixed on the way: shared-client output notes never become input notes (kb note), wasm-bindgen Felt handle reuse (kb note), MidenProvider stuck behind a disconnected signer (kb note), handshake effect cancellation on stage change, accept-note dedupe across games.
-- Left as follow-ups: `.claude/hooks/build-contracts.sh` and `check-artifacts.sh` are pre-migration no-ops; `frontend-template/.claude/skills/{miden-concepts,frontend-pitfalls,vite-wasm-setup}` still mention the Rust SDK / SDK 0.13; game sessions live only in React state (a reload starts over).
+## Follow-ups
+- Wallet-extension custody (mainnet): wire `@miden-sdk/miden-wallet-adapter-{base,react}` outside the Miden provider for the stake/claim transactions (`publishStake`/`claimNotes` already take any wallet address) and a P2ID fee top-up of the game account from the wallet; the local NoAuth wallet stays the testnet path. Blocked on testing with the extension installed.
+- Stake tier agreement is out of band: the challenge note cannot carry the tier (fixed 28-item storage); the UI gates the first shot on a matching opponent stake note.
+- Testnet left eight extra 1000-unit stake notes from the first e2e attempt (a consumed handle threw after each submit); they refund to their wallet after 60 days.
+- `GameStatus` strings are formatted outside the component because React 19's dev-mode render logging cannot serialize bigint props.

@@ -240,3 +240,12 @@ Conclusions:
 - The web SDK does expose `Poseidon2.hashElements`, so the setup script's advice-payload
   preimage check (removed during the migration) can be restored; the spec keeps the key-based
   variant since the payload is the owner's own data.
+
+
+## Implementation refinements (2026-10-07, after the build)
+
+- Turn rule: `fire_shot` only requires `results_processed == shots_fired` (the previous result is processed); the acceptor is not additionally bound to the number of shots received, so a delayed answer never squeezes a deadline.
+- Every move is one transaction: the opponent's pending notes (result, shot, or the acceptance for the challenger's first move) are consumed first, then `fire_tx` runs. The defender's result deadline is the shot note's argument.
+- Browser deadlines come from the wall clock plus `DEADLINE_MARGIN_SECONDS` (the SDK's client wrapper exposes no block header); forfeits are claimed `CLAIM_MARGIN_SECONDS` after the deadline.
+- Browser accounts are built with `buildWithoutSchemaCommitment()` so the pinned initial storage commitment equals the Rust builder's.
+- Testnet wallets are local public NoAuth accounts funded from the faucet; the extension wallet is the mainnet follow-up.

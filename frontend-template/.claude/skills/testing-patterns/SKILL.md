@@ -110,12 +110,12 @@ Reference tests in this project:
 
 | Pattern | File | Tests |
 |---------|------|-------|
-| Pure helpers | `src/lib/__tests__/board.test.ts`, `notes.test.ts` | packing, storage builders, result encoding |
-| Flow against a fake client | `src/lib/__tests__/game.test.ts` | note parsing, classification and discovery, commit polling, setup request, shot publishing, result recipient |
+| Pure helpers | `src/lib/__tests__/board.test.ts`, `notes.test.ts`, `state.test.ts`, `gameplay.test.ts`, `session.test.ts`, `contracts.test.ts` | packing, storage builders, predicted component notes, result encoding, state parsing, countdown, session persistence, template substitution |
+| Flow against a fake client | `src/lib/__tests__/game.test.ts` | note parsing (handshake, shot, result, stake), classification and discovery, commit polling, setup request, handshake publication, turn and deadline planning, `submitMove`, `reclaimNote` |
 | Faucet HTTP client | `src/lib/__tests__/funding.test.ts` | PoW, retries, top-up policy |
 | Hooks reading storage | `src/hooks/__tests__/useGameState.test.ts`, `useBoardState.test.ts` | phase/turn parsing, board rendering |
-| Hook with a mutation | `src/hooks/__tests__/useFireShot.test.ts` | success, error, busy state |
-| Components | `src/components/__tests__/*.test.tsx` | rendering, interactions |
+| Gameplay loop | `src/hooks/__tests__/useGameplaySync.test.ts` | pending-note handling, forced resolution/processing, `fire()`, forfeit countdown and claim, stake publication and claim |
+| Components | `src/components/__tests__/*.test.tsx` | rendering, interactions (firing, forfeit countdown and claim, stake gating, game over, sync height) |
 
 ### Minimum test coverage per component
 
@@ -133,7 +133,7 @@ The app builds notes, accounts and transaction requests with the raw SDK types, 
 vi.mock("@miden-sdk/miden-sdk", () => import("@/__tests__/mocks/miden-sdk"));
 import { makeTestNote, makeTestRecord } from "@/__tests__/mocks/miden-sdk";
 
-const shot = makeTestNote({ sender: OPPONENT, target: ME, root: SHOT_ROOT, storage: [0n, 0n, 1n, ...serial, ...resultRoot] });
+const shot = makeTestNote({ sender: OPPONENT, target: ME, root: SHOT_ROOT, storage: [3n, 4n, 7n, 500n] });   // [row, col, turn, deadline]
 const record = makeTestRecord(shot);                       // InputNoteRecord-like, unconsumed
 ```
 
@@ -154,7 +154,7 @@ vi.mocked(useAccount).mockReturnValue({
 });
 ```
 
-`game_config = [grid_size, num_placed, phase, expected_turn]`, `opponent = [prefix, suffix, ships_hit_count, total_shots_received]`, `reveal_status = [my_revealed, opponent_verified, 0, 0]`, and the `my_board` map answers `getMapItem(slot, [0,0,0,row])` with a packed row.
+`game_config = [grid_size, num_placed, phase, expected_turn]`, `opponent = [prefix, suffix, ships_hit_count, total_shots_received]`, `turn_state = [shots_fired, results_processed, role, 0]`, `last_shot = [row, col, turn, 0]`, `outcome = [outcome, 0, 0, 0]`, `owner_wallet` / `opponent_wallet = [prefix, suffix, 0, 0]` (all optional in `MockGameStorageOptions`), and the `my_board` map answers `getMapItem(slot, [0,0,0,row])` with a packed row (`boardCells`).
 
 ## Automated Verification Pipeline
 

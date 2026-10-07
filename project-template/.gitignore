@@ -30,3 +30,5 @@ local-node-data/
 # Ignore contract build artifacts
 contracts/**/target/
 
+testnet-store-*.sqlite3-shm
+testnet-store-*.sqlite3-wal

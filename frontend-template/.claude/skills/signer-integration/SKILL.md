@@ -7,7 +7,7 @@ description: Guide to integrating external signers (Para, Turnkey, MidenFi walle
 
 ## This App Uses No Signer
 
-Miden Battleship renders `MidenProvider` without any signer provider (`src/providers.tsx`). Its per-match game accounts are public accounts composed of the battleship component, `BasicWallet` and `NoAuth`; they are funded from the public faucet and pay their own fees, so transactions are submitted directly from the raw client with no signature and no popup. The wallet adapter that an earlier version used has been removed: `MidenProvider` never initializes behind a signer provider that is not connected, and the game needs no user-held keys. Read the rest of this skill only if you are adding a feature that genuinely needs the user's own account (for example moving real assets).
+Miden Battleship renders `MidenProvider` without any signer provider (`src/providers.tsx`). Its per-match game accounts are private accounts composed of the battleship component, `BasicWallet` and `NoAuth`, and the player's wallet on testnet is a local public `NoAuth` wallet (`createLocalWallet`); both are funded from the public faucet and pay their own fees, so transactions are submitted directly from the raw client with no signature and no popup. The wallet adapter that an earlier version used has been removed: `MidenProvider` never initializes behind a signer provider that is not connected, and the game needs no user-held keys. Read the rest of this skill when replacing the local wallet with the user's browser-extension wallet (the planned follow-up: it would publish the stake note and claim the prize), or for any feature that genuinely needs the user's own account.
 
 ## Overview
 
