@@ -1,0 +1,21 @@
+use battleship::account as battleship
+
+# Fire transaction script: runs on the shooter's own game account to fire the next shot. It is
+# also used in the transaction that consumes the accept note (turn 1) or a result note (later
+# turns), so a move is always one transaction.
+
+#! Inputs:  [TX_SCRIPT_ARGS, pad(12)] where TX_SCRIPT_ARGS = [row, col, deadline, 0]
+#! Outputs: [pad(16)]
+#!
+#! Invocation: dyncall
+@transaction_script
+pub proc main(args: word)
+    movup.3 drop
+    # => [row, col, deadline, pad(13)]
+
+    call.battleship::fire_shot
+    # => [pad(16)]
+
+    dropw dropw dropw dropw
+    # => [pad(16)]
+end

@@ -9,12 +9,15 @@ use battleship::account as battleship
 # owner, who also provides the payload, so no preimage check is needed (the Rust side uses the
 # payload's sequential hash, the frontend a random word).
 #
-# Payload (20 felts, 5 words):
+# Payload (36 felts, 9 words):
 #   [0..4)   GAME_ID
 #   [4]      opponent_prefix
 #   [5]      opponent_suffix
-#   [6..10)  COMMITMENT (this player's salted board commitment)
-#   [10..20) packed board rows 0..9 (10 cells x 3 bits each)
+#   [6]      owner_wallet_prefix
+#   [7]      owner_wallet_suffix
+#   [8..18)  packed board rows 0..9 (10 cells x 3 bits each)
+#   [18..22) SHOT_ROOT, [22..26) RESULT_ROOT, [26..30) DEFEAT_ROOT, [30..34) FORFEIT_ROOT
+#   [34..36) padding
 #
 
 # CONSTANTS
@@ -22,20 +25,25 @@ use battleship::account as battleship
 
 # Memory address at which the payload is written; must be word-aligned.
 const PAYLOAD_ADDR = 0
-const PAYLOAD_NUM_ITEMS = 20
-const PAYLOAD_NUM_WORDS = 5
+const PAYLOAD_NUM_ITEMS = 36
+const PAYLOAD_NUM_WORDS = 9
 
 const GAME_ID_PTR = PAYLOAD_ADDR
 const OPPONENT_PREFIX_PTR = PAYLOAD_ADDR + 4
 const OPPONENT_SUFFIX_PTR = PAYLOAD_ADDR + 5
-const COMMITMENT_PTR = PAYLOAD_ADDR + 6
-const ROWS_PTR = PAYLOAD_ADDR + 10
+const WALLET_PREFIX_PTR = PAYLOAD_ADDR + 6
+const WALLET_SUFFIX_PTR = PAYLOAD_ADDR + 7
+const ROWS_PTR = PAYLOAD_ADDR + 8
+const SHOT_ROOT_PTR = PAYLOAD_ADDR + 18
+const RESULT_ROOT_PTR = PAYLOAD_ADDR + 22
+const DEFEAT_ROOT_PTR = PAYLOAD_ADDR + 26
+const FORFEIT_ROOT_PTR = PAYLOAD_ADDR + 30
 
 # ERRORS
 # =================================================================================================
 
 const ERR_SETUP_PAYLOAD_LENGTH_INVALID = "setup payload length advice input is not a valid u32"
-const ERR_SETUP_PAYLOAD_WRONG_LENGTH = "setup payload must contain exactly 20 elements"
+const ERR_SETUP_PAYLOAD_WRONG_LENGTH = "setup payload must contain exactly 36 elements"
 
 # TRANSACTION SCRIPT
 # =================================================================================================
@@ -50,8 +58,8 @@ const ERR_SETUP_PAYLOAD_WRONG_LENGTH = "setup payload must contain exactly 20 el
 #!
 #! Panics if:
 #! - the advice map has no entry for PAYLOAD_KEY.
-#! - the payload does not contain exactly 20 elements.
-#! - battleship::set_board_rows or battleship::finalize_board fails to verify.
+#! - the payload does not contain exactly 36 elements.
+#! - battleship::set_board_rows, set_script_roots or finalize_board fails to verify.
 #!
 #! Invocation: dyncall
 @transaction_script
@@ -97,23 +105,42 @@ pub proc main(payload_key: word)
     dropw dropw dropw dropw
     # => [pad(16)]
 
-    # finalize_board window [GAME_ID, opponent_suffix, opponent_prefix, COMMITMENT, pad(6)]
-    padw push.0.0
-    push.COMMITMENT_PTR add.3 mem_load
-    push.COMMITMENT_PTR add.2 mem_load
-    push.COMMITMENT_PTR add.1 mem_load
-    push.COMMITMENT_PTR mem_load
+    # set_script_roots window [SHOT_ROOT, RESULT_ROOT, DEFEAT_ROOT, FORFEIT_ROOT]
+    push.FORFEIT_ROOT_PTR add.3 mem_load
+    push.FORFEIT_ROOT_PTR add.2 mem_load
+    push.FORFEIT_ROOT_PTR add.1 mem_load
+    push.FORFEIT_ROOT_PTR mem_load
+    push.DEFEAT_ROOT_PTR add.3 mem_load
+    push.DEFEAT_ROOT_PTR add.2 mem_load
+    push.DEFEAT_ROOT_PTR add.1 mem_load
+    push.DEFEAT_ROOT_PTR mem_load
+    push.RESULT_ROOT_PTR add.3 mem_load
+    push.RESULT_ROOT_PTR add.2 mem_load
+    push.RESULT_ROOT_PTR add.1 mem_load
+    push.RESULT_ROOT_PTR mem_load
+    push.SHOT_ROOT_PTR add.3 mem_load
+    push.SHOT_ROOT_PTR add.2 mem_load
+    push.SHOT_ROOT_PTR add.1 mem_load
+    push.SHOT_ROOT_PTR mem_load
+    # => [SHOT_ROOT, RESULT_ROOT, DEFEAT_ROOT, FORFEIT_ROOT, pad(16)]
+
+    call.battleship::set_script_roots
+    dropw dropw dropw dropw
+    # => [pad(16)]
+
+    # finalize_board window [GAME_ID, opponent_suffix, opponent_prefix, wallet_suffix, wallet_prefix, pad(8)]
+    padw padw
+    mem_load.WALLET_PREFIX_PTR
+    mem_load.WALLET_SUFFIX_PTR
     mem_load.OPPONENT_PREFIX_PTR
     mem_load.OPPONENT_SUFFIX_PTR
     push.GAME_ID_PTR add.3 mem_load
     push.GAME_ID_PTR add.2 mem_load
     push.GAME_ID_PTR add.1 mem_load
     push.GAME_ID_PTR mem_load
-    # => [GAME_ID, opponent_suffix, opponent_prefix, COMMITMENT, pad(6), pad(16)]
+    # => [GAME_ID, opponent_suffix, opponent_prefix, wallet_suffix, wallet_prefix, pad(8), pad(16)]
 
     call.battleship::finalize_board
-    # => [pad(16), pad(16)]
-
     dropw dropw dropw dropw
     # => [pad(16)]
 end

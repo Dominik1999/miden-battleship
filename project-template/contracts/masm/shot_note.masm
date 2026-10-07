@@ -1,71 +1,73 @@
 use {NoteArgs} from miden::protocol::types
+use miden::protocol::account_id
+use miden::protocol::active_account
 use miden::protocol::active_note
 use battleship::account as battleship
 
-# Shot note: sent by the shooter to the defender from the shooter's game account. The defender
-# consumes it to resolve the shot; the account procedure creates the public result note.
+# Shot note: created by the shooter's game account (`fire_shot`) for the defender. The defender
+# consumes it to resolve the shot; after the deadline the shooter may consume its own note instead,
+# which claims a forfeit.
 
 # CONSTANTS
 # =================================================================================================
 
-# Memory base at which the note storage is written by `active_note::get_bounded_storage`.
 const STORAGE_PTR = 0
 
-# Note storage layout: [row, col, turn, RESULT_SERIAL_NUM(4), RESULT_SCRIPT_ROOT(4)].
+# Note storage layout: [row, col, turn, deadline].
 const ROW_PTR = STORAGE_PTR
 const COL_PTR = STORAGE_PTR + 1
 const TURN_PTR = STORAGE_PTR + 2
-const RESULT_SERIAL_NUM_PTR = STORAGE_PTR + 3
-const RESULT_SCRIPT_ROOT_PTR = STORAGE_PTR + 7
-const NUM_STORAGE_ITEMS = 11
+const DEADLINE_PTR = STORAGE_PTR + 3
+const NUM_STORAGE_ITEMS = 4
+
+const ROOT_SHOT = 0
 
 # ERRORS
 # =================================================================================================
 
-const ERR_SHOT_NOTE_WRONG_NUM_STORAGE_ITEMS = "shot note must carry exactly 11 storage items"
+const ERR_SHOT_NOTE_WRONG_NUM_STORAGE_ITEMS = "shot note must carry exactly 4 storage items"
 
 # NOTE SCRIPT
 # =================================================================================================
 
-#! Resolves the shot carried by this note on the consuming (defending) account.
+#! Resolves the shot on the defending account, or claims a forfeit on the shooting account.
 #!
 #! Inputs:  [NOTE_ARGS, pad(12)]
 #! Outputs: [pad(16)]
 #!
-#! Panics if:
-#! - the note does not carry exactly NUM_STORAGE_ITEMS storage items.
-#! - battleship::process_shot fails to verify.
+#! Where:
+#! - NOTE_ARGS[0] is the deadline the defender gives the shooter to answer the result note.
 #!
 #! Invocation: dyncall
 @note_script
 pub proc main(args: NoteArgs)
-    dropw
-    # => [pad(16)]
+    movdn.3 drop drop drop
+    # => [result_deadline, pad(12)]
 
     push.NUM_STORAGE_ITEMS push.STORAGE_PTR exec.active_note::get_bounded_storage
-    # => [num_storage_items, pad(16)]
-
     eq.NUM_STORAGE_ITEMS assert.err=ERR_SHOT_NOTE_WRONG_NUM_STORAGE_ITEMS
-    # => [pad(16)]
+    # => [result_deadline, pad(12)]
 
-    # build the process_shot window [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-    padw push.0
-    push.RESULT_SCRIPT_ROOT_PTR add.3 mem_load
-    push.RESULT_SCRIPT_ROOT_PTR add.2 mem_load
-    push.RESULT_SCRIPT_ROOT_PTR add.1 mem_load
-    push.RESULT_SCRIPT_ROOT_PTR mem_load
-    push.RESULT_SERIAL_NUM_PTR add.3 mem_load
-    push.RESULT_SERIAL_NUM_PTR add.2 mem_load
-    push.RESULT_SERIAL_NUM_PTR add.1 mem_load
-    push.RESULT_SERIAL_NUM_PTR mem_load
-    mem_load.TURN_PTR
-    mem_load.COL_PTR
-    mem_load.ROW_PTR
-    # => [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5), pad(16)]
+    exec.active_note::get_sender exec.active_account::get_id exec.account_id::eq
+    # => [is_own_note, result_deadline, pad(12)]
 
-    call.battleship::process_shot
-    # => [encoded_result, pad(15), pad(16)]
-
-    dropw dropw dropw dropw
+    if.true
+        drop
+        padw padw padw push.0.0 push.ROOT_SHOT mem_load.DEADLINE_PTR
+        # => [deadline, ROOT_SHOT, pad(14), pad(12)]
+        call.battleship::claim_forfeit
+        dropw dropw dropw dropw
+    else
+        padw padw padw
+        # => [pad(12), result_deadline, pad(12)]
+        mem_load.TURN_PTR
+        mem_load.COL_PTR
+        mem_load.ROW_PTR
+        # => [row, col, turn, pad(12), result_deadline, ...]
+        movup.15 movdn.3
+        # => [row, col, turn, result_deadline, pad(12), ...]
+        call.battleship::process_shot
+        dropw dropw dropw dropw
+    end
     # => [pad(16)]
 end

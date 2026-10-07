@@ -1,14 +1,39 @@
 use {NoteArgs} from miden::protocol::types
+use miden::protocol::account_id
+use miden::protocol::active_account
+use miden::protocol::active_note
+use battleship::account as battleship
 
-# Result note: created by the defender's account while it resolves a shot. It carries the result
-# to the shooter as public data: storage = [shooter_prefix, shooter_suffix, turn, encoded_result]
-# where encoded_result = is_hit * 2 + game_over. The shooter reads it during sync; consuming it
-# only removes the note and has no effect on the consuming account.
+# Result note: created by the defender's game account (`process_shot`) for the shooter. The shooter
+# consumes it to record the result (and fires its next shot in the same transaction); after the
+# deadline the defender may consume its own note instead, which claims a forfeit, unless the
+# result ended the game.
+
+# CONSTANTS
+# =================================================================================================
+
+const STORAGE_PTR = 0
+
+# Note storage layout: [shooter_prefix, shooter_suffix, turn, encoded_result, deadline].
+const SHOOTER_PREFIX_PTR = STORAGE_PTR
+const SHOOTER_SUFFIX_PTR = STORAGE_PTR + 1
+const TURN_PTR = STORAGE_PTR + 2
+const ENCODED_RESULT_PTR = STORAGE_PTR + 3
+const DEADLINE_PTR = STORAGE_PTR + 4
+const NUM_STORAGE_ITEMS = 5
+
+const ROOT_RESULT = 1
+
+# ERRORS
+# =================================================================================================
+
+const ERR_RESULT_NOTE_WRONG_NUM_STORAGE_ITEMS = "result note must carry exactly 5 storage items"
+const ERR_RESULT_NOTE_FINAL_NOT_RECLAIMABLE = "a final result note cannot be reclaimed"
 
 # NOTE SCRIPT
 # =================================================================================================
 
-#! Does nothing: the note is a data carrier.
+#! Records the result on the shooting account, or claims a forfeit on the defending account.
 #!
 #! Inputs:  [NOTE_ARGS, pad(12)]
 #! Outputs: [pad(16)]
@@ -17,5 +42,28 @@ use {NoteArgs} from miden::protocol::types
 @note_script
 pub proc main(args: NoteArgs)
     dropw
+    push.NUM_STORAGE_ITEMS push.STORAGE_PTR exec.active_note::get_bounded_storage
+    eq.NUM_STORAGE_ITEMS assert.err=ERR_RESULT_NOTE_WRONG_NUM_STORAGE_ITEMS
+    # => [pad(16)]
+
+    exec.active_note::get_sender exec.active_account::get_id exec.account_id::eq
+    # => [is_own_note, pad(16)]
+
+    if.true
+        mem_load.ENCODED_RESULT_PTR push.2 u32mod assertz.err=ERR_RESULT_NOTE_FINAL_NOT_RECLAIMABLE
+        padw padw padw push.0.0 push.ROOT_RESULT mem_load.DEADLINE_PTR
+        # => [deadline, ROOT_RESULT, pad(14), pad(16)]
+        call.battleship::claim_forfeit
+        dropw dropw dropw dropw
+    else
+        padw padw padw
+        mem_load.ENCODED_RESULT_PTR
+        mem_load.TURN_PTR
+        mem_load.SHOOTER_PREFIX_PTR
+        mem_load.SHOOTER_SUFFIX_PTR
+        # => [shooter_suffix, shooter_prefix, turn, encoded_result, pad(12), pad(16)]
+        call.battleship::process_result
+        dropw dropw dropw dropw
+    end
     # => [pad(16)]
 end

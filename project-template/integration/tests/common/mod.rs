@@ -1,8 +1,9 @@
 //! Shared MockChain harness for the battleship integration tests.
 //!
-//! Every transaction runs on a fee-charging chain (`BASE_FEE`), so the `NoAuth` fee payment path
-//! is exercised exactly as on testnet. Game accounts A and B are funded with the chain's fee asset
-//! at genesis; a third account C is a stranger that is never part of the game.
+//! Two players, each with a PRIVATE game account (NoAuth + BasicWallet + battleship) and a public
+//! owner wallet. Game accounts are new accounts funded by a genesis P2ID note of the chain's fee
+//! asset; their first transaction (consuming it) deploys them, exactly like on testnet. The chain
+//! charges fees (`BASE_FEE`), so the NoAuth fee path is exercised everywhere.
 
 #![allow(dead_code)]
 
@@ -11,65 +12,69 @@ use integration::battleship::*;
 use miden_client::{
     account::{Account, AccountId},
     asset::FungibleAsset,
-    note::{Note, PartialNote},
+    note::{Note, NoteId, PartialNote},
     transaction::{
         ExecutedTransaction, RawOutputNote, TransactionExecutorError, TransactionScript,
     },
     Felt, Word,
 };
-use miden_protocol::{errors::MasmError, testing::account_id::ACCOUNT_ID_FEE_FAUCET};
+use miden_protocol::errors::MasmError;
 use miden_standards::tx_script::SendNotesTransactionScript;
-use miden_testing::{MockChain, MockTransactionBuilder};
+use miden_testing::{Auth, MockChain, MockTransactionBuilder};
 
 pub const BASE_FEE: u32 = 100;
 pub const INITIAL_FEE_BALANCE: u64 = 10_000_000;
-
 pub const GAME_ID: [u64; 4] = [10, 20, 30, 40];
-pub const A_COMMITMENT: [u64; 4] = [100, 200, 300, 400];
-pub const B_COMMITMENT: [u64; 4] = [500, 600, 700, 800];
-
 pub const SEED_A: [u8; 32] = [1; 32];
 pub const SEED_B: [u8; 32] = [2; 32];
 pub const SEED_C: [u8; 32] = [3; 32];
-
-pub fn fee_faucet_id() -> AccountId {
-    AccountId::try_from(ACCOUNT_ID_FEE_FAUCET).expect("fee faucet id is valid")
-}
 
 pub fn serial(n: u64) -> Word {
     word([n, 0, 0, 0])
 }
 
-/// A mock chain with the compiled battleship scripts and the three test accounts.
+/// A player: its private game account (seed word kept for the handshake) and its owner wallet.
+#[derive(Clone)]
+pub struct Player {
+    pub id: AccountId,
+    pub seed: Word,
+    pub wallet: AccountId,
+    /// The account object, used for the deploying first transaction.
+    pub account: Account,
+    pub deployed: bool,
+}
+
+/// A mock chain with the compiled battleship scripts, two players and a stranger C.
 pub struct Game {
     pub chain: MockChain,
     pub scripts: BattleshipScripts,
-    pub a: AccountId,
-    pub b: AccountId,
-    pub c: AccountId,
+    pub a: Player,
+    pub b: Player,
+    pub c: Player,
     next_serial: u64,
 }
 
 impl Game {
     pub fn new() -> Result<Self> {
-        Self::with_base_fee(BASE_FEE)
-    }
-
-    pub fn with_base_fee(base_fee: u32) -> Result<Self> {
         let scripts = BattleshipScripts::compile()?;
-        let mut builder = MockChain::builder().verification_base_fee(base_fee);
-        let mut add = |seed| -> Result<AccountId> {
-            let fee_asset = FungibleAsset::new(fee_faucet_id(), INITIAL_FEE_BALANCE)?;
+        let mut builder = MockChain::builder().verification_base_fee(BASE_FEE);
+        let mut player = |seed: [u8; 32]| -> Result<Player> {
+            let wallet = builder.add_existing_wallet(Auth::IncrNonce)?.id();
             let account = game_account_builder(seed, scripts.component.clone())
-                .with_assets([fee_asset.into()])
-                .build_existing()
+                .build()
                 .context("failed to build game account")?;
-            builder.add_account(account.clone())?;
-            Ok(account.id())
+            builder.add_p2id_note_with_fee(account.id(), INITIAL_FEE_BALANCE)?;
+            Ok(Player {
+                id: account.id(),
+                seed: account.seed().context("new account has a seed")?,
+                wallet,
+                account,
+                deployed: false,
+            })
         };
-        let a = add(SEED_A)?;
-        let b = add(SEED_B)?;
-        let c = add(SEED_C)?;
+        let a = player(SEED_A)?;
+        let b = player(SEED_B)?;
+        let c = player(SEED_C)?;
         let chain = builder.build()?;
         Ok(Self {
             chain,
@@ -77,16 +82,40 @@ impl Game {
             a,
             b,
             c,
-            next_serial: 1,
+            next_serial: 100,
         })
+    }
+
+    pub fn player(&self, id: AccountId) -> &Player {
+        [&self.a, &self.b, &self.c]
+            .into_iter()
+            .find(|p| p.id == id)
+            .expect("known player")
+    }
+
+    fn player_mut(&mut self, id: AccountId) -> &mut Player {
+        [&mut self.a, &mut self.b, &mut self.c]
+            .into_iter()
+            .find(|p| p.id == id)
+            .expect("known player")
+    }
+
+    pub fn opponent_of(&self, id: AccountId) -> &Player {
+        if id == self.a.id {
+            &self.b
+        } else {
+            &self.a
+        }
     }
 
     // ------------------------------------------------------------------------------------------
     // State
     // ------------------------------------------------------------------------------------------
 
+    /// The current state of a game account. Game accounts are private, so the chain only knows
+    /// their commitment; the harness keeps the full state and applies every transaction's patch.
     pub fn account(&self, id: AccountId) -> Result<Account> {
-        Ok(self.chain.committed_account(id)?.clone())
+        Ok(self.player(id).account.clone())
     }
 
     pub fn state(&self, id: AccountId) -> Result<GameState> {
@@ -98,12 +127,30 @@ impl Game {
     }
 
     pub fn fee_balance(&self, id: AccountId) -> Result<u64> {
-        let account = self.account(id)?;
-        Ok(account
+        let fee_faucet = self.chain.fee_faucet_id();
+        Ok(self
+            .account(id)?
             .vault()
-            .get_balance(FungibleAsset::new(fee_faucet_id(), 0)?.id())
+            .get_balance(FungibleAsset::new(fee_faucet, 0)?.id())
             .map(|amount| amount.as_u64())
             .unwrap_or(0))
+    }
+
+    /// Timestamp of the latest block (the reference block of the next transaction).
+    pub fn now(&self) -> u64 {
+        self.chain.latest_block_header().timestamp() as u64
+    }
+
+    /// A deadline exactly 12 hours after the reference block.
+    pub fn deadline(&self) -> u64 {
+        self.now() + DEADLINE_DELTA
+    }
+
+    /// Proves an empty block `secs` after the latest one.
+    pub fn advance_time(&mut self, secs: u64) -> Result<()> {
+        let ts = (self.now() + secs) as u32;
+        self.chain.prove_next_block_at(ts)?;
+        Ok(())
     }
 
     pub fn fresh_serial(&mut self) -> Word {
@@ -115,26 +162,60 @@ impl Game {
     // Transactions
     // ------------------------------------------------------------------------------------------
 
-    /// Executes a transaction on `id` and, on success, commits it in a new block.
+    /// Executes a transaction on the private game account `id` from the harness's copy of its
+    /// state and, on success, commits it in a new block and applies the patch to that copy.
     pub async fn execute(
         &mut self,
         id: AccountId,
         configure: impl for<'a> FnOnce(MockTransactionBuilder<'a>) -> MockTransactionBuilder<'a>,
     ) -> Result<ExecutedTransaction> {
-        let tx = configure(self.chain.build_transaction(id)).build()?;
+        let account = self.player(id).account.clone();
+        let tx = configure(self.chain.build_transaction(account)).build()?;
+        let executed = tx.execute().await?;
+        self.chain.add_pending_executed_transaction(&executed)?;
+        self.chain.prove_next_block()?;
+        let player = self.player_mut(id);
+        player.account.apply_patch(executed.account_patch())?;
+        player.deployed = true;
+        Ok(executed)
+    }
+
+    /// Executes a transaction on a public wallet account (owner wallets).
+    pub async fn execute_wallet(
+        &mut self,
+        wallet: AccountId,
+        configure: impl for<'a> FnOnce(MockTransactionBuilder<'a>) -> MockTransactionBuilder<'a>,
+    ) -> Result<ExecutedTransaction> {
+        let tx = configure(self.chain.build_transaction(wallet)).build()?;
         let executed = tx.execute().await?;
         self.chain.add_pending_executed_transaction(&executed)?;
         self.chain.prove_next_block()?;
         Ok(executed)
     }
 
-    /// Runs a transaction script on `id` with an optional script argument and advice map entries.
+    /// Consumes the genesis funding note: deploys the game account.
+    pub async fn fund(&mut self, id: AccountId) -> Result<ExecutedTransaction> {
+        let note = self
+            .chain
+            .committed_notes()
+            .values()
+            .find(|n| {
+                n.metadata().tag() == miden_client::note::NoteTag::with_account_target(id)
+                    && n.metadata().sender() != id
+            })
+            .map(|n| n.id())
+            .context("funding note for the account")?;
+        self.execute(id, move |b| b.authenticated_input_note(note))
+            .await
+    }
+
     pub async fn run_script(
         &mut self,
         id: AccountId,
         script: TransactionScript,
         script_arg: Option<Word>,
         advice_map: Vec<(Word, Vec<Felt>)>,
+        expected: Vec<Note>,
     ) -> Result<ExecutedTransaction> {
         self.execute(id, move |mut builder| {
             builder = builder.tx_script(script);
@@ -144,38 +225,38 @@ impl Game {
             for (key, value) in advice_map {
                 builder = builder.add_advice_map_entry(key, value);
             }
+            for note in expected {
+                builder = builder.expected_output_note(RawOutputNote::Full(note));
+            }
             builder
         })
         .await
     }
 
-    /// Runs the setup transaction script on `id` with the classic board.
-    pub async fn setup(
-        &mut self,
-        id: AccountId,
-        opponent: AccountId,
-        commitment: [u64; 4],
-    ) -> Result<ExecutedTransaction> {
-        self.setup_with_rows(id, opponent, commitment, pack_board(&classic_ship_cells()))
+    /// Runs the setup transaction script on `id` with the classic board (`b` is `a`'s opponent).
+    pub async fn setup(&mut self, id: AccountId) -> Result<ExecutedTransaction> {
+        self.setup_with_rows(id, pack_board(&classic_ship_cells()))
             .await
     }
 
     pub async fn setup_with_rows(
         &mut self,
         id: AccountId,
-        opponent: AccountId,
-        commitment: [u64; 4],
         rows: [u64; 10],
     ) -> Result<ExecutedTransaction> {
-        let payload = build_setup_payload(word(GAME_ID), opponent, word(commitment), &rows);
-        let arg = setup_payload_commitment(&payload);
-        self.run_script(
-            id,
-            self.scripts.setup_tx.clone(),
-            Some(arg),
-            vec![(arg, payload)],
-        )
-        .await
+        let opponent = self.opponent_of(id).id;
+        let wallet = self.player(id).wallet;
+        let payload = build_setup_payload(
+            word(GAME_ID),
+            opponent,
+            wallet,
+            &rows,
+            &self.scripts.roots(),
+        );
+        let key = setup_payload_commitment(&payload);
+        let script = self.scripts.setup_tx.clone();
+        self.run_script(id, script, Some(key), vec![(key, payload)], vec![])
+            .await
     }
 
     /// Publishes `note` from `from`'s game account via the BasicWallet send-notes script, exactly
@@ -194,161 +275,265 @@ impl Game {
         .await
     }
 
-    /// Consumes a committed note on `id`.
-    pub async fn consume(&mut self, id: AccountId, note: &Note) -> Result<ExecutedTransaction> {
+    /// Consumes a committed note on `id`, optionally with note args and expected output notes.
+    pub async fn consume_with(
+        &mut self,
+        id: AccountId,
+        note: &Note,
+        args: Option<Word>,
+        expected: Vec<Note>,
+        tx_script: Option<(TransactionScript, Word)>,
+    ) -> Result<ExecutedTransaction> {
         let note_id = note.id();
-        self.execute(id, move |builder| builder.authenticated_input_note(note_id))
-            .await
-    }
-
-    /// Consumes a committed shot note on the defender `id`; the result note script is registered
-    /// so the executor can materialize the public result note the account creates.
-    pub async fn consume_shot(
-        &mut self,
-        id: AccountId,
-        shot: &Note,
-    ) -> Result<ExecutedTransaction> {
-        let note_id = shot.id();
-        let result_script = self.scripts.result_note.clone();
-        self.execute(id, move |builder| {
+        self.execute(id, move |mut builder| {
+            builder = builder.authenticated_input_note(note_id);
+            if let Some(args) = args {
+                builder = builder.extend_note_args([(note_id, args)].into_iter().collect());
+            }
+            for n in expected {
+                builder = builder.expected_output_note(RawOutputNote::Full(n));
+            }
+            if let Some((script, arg)) = tx_script {
+                builder = builder.tx_script(script).tx_script_args(arg);
+            }
             builder
-                .authenticated_input_note(note_id)
-                .add_note_script(result_script)
         })
         .await
     }
 
-    /// Like `consume_shot`, but declares the exact expected result note (the client's
-    /// `expected_output_recipients` path).
-    pub async fn consume_shot_expecting(
-        &mut self,
-        id: AccountId,
-        shot: &Note,
-        expected: Note,
-    ) -> Result<ExecutedTransaction> {
-        let note_id = shot.id();
-        self.execute(id, move |builder| {
-            builder
-                .authenticated_input_note(note_id)
-                .expected_output_note(RawOutputNote::Full(expected))
-        })
-        .await
+    pub async fn consume(&mut self, id: AccountId, note: &Note) -> Result<ExecutedTransaction> {
+        self.consume_with(id, note, None, vec![], None).await
     }
 
     // ------------------------------------------------------------------------------------------
     // Game flow
     // ------------------------------------------------------------------------------------------
 
-    pub fn challenge_note(&mut self) -> Result<Note> {
+    pub fn handshake_note(&mut self, from: AccountId, challenge: bool) -> Result<Note> {
+        let script = if challenge {
+            self.scripts.challenge_note.clone()
+        } else {
+            self.scripts.accept_note.clone()
+        };
         let serial = self.fresh_serial();
+        let sender = self.player(from).clone();
+        let to = self.opponent_of(from).id;
+        let roots = self.scripts.roots();
         make_game_note(
-            self.scripts.challenge_note.clone(),
-            self.a,
-            self.b,
-            handshake_storage(word(GAME_ID), self.a, word(A_COMMITMENT)),
+            script,
+            from,
+            to,
+            handshake_storage(word(GAME_ID), from, sender.seed, sender.wallet, &roots),
             serial,
         )
+    }
+
+    pub fn challenge_note(&mut self) -> Result<Note> {
+        let a = self.a.id;
+        self.handshake_note(a, true)
     }
 
     pub fn accept_note(&mut self) -> Result<Note> {
-        let serial = self.fresh_serial();
-        make_game_note(
-            self.scripts.accept_note.clone(),
-            self.b,
-            self.a,
-            handshake_storage(word(GAME_ID), self.b, word(B_COMMITMENT)),
-            serial,
-        )
+        let b = self.b.id;
+        self.handshake_note(b, false)
     }
 
-    pub fn shot_note(
-        &mut self,
+    /// The turn `id` fires next, from its on-chain state.
+    pub fn next_fire_turn(&self, id: AccountId) -> Result<u64> {
+        let s = self.state(id)?;
+        Ok(if s.role == ROLE_CHALLENGER {
+            2 * s.shots_fired + 1
+        } else {
+            2 * s.shots_fired + 2
+        })
+    }
+
+    /// The shot note `fire_shot` will create for the next shot of `shooter`.
+    pub fn shot_note_for(
+        &self,
         shooter: AccountId,
-        defender: AccountId,
         row: u64,
         col: u64,
-        turn: u64,
+        deadline: u64,
     ) -> Result<Note> {
-        let serial = self.fresh_serial();
-        let result_serial = self.fresh_serial();
-        make_game_note(
-            self.scripts.shot_note.clone(),
+        let turn = self.next_fire_turn(shooter)?;
+        expected_shot_note(
+            &self.scripts,
             shooter,
-            defender,
-            shot_storage(
-                row,
-                col,
-                turn,
-                result_serial,
-                self.scripts.result_script_root(),
-            ),
-            serial,
+            self.opponent_of(shooter).id,
+            row,
+            col,
+            turn,
+            deadline,
         )
     }
 
-    pub fn reveal_note(
-        &mut self,
-        from: AccountId,
-        to: AccountId,
-        commitment: [u64; 4],
-    ) -> Result<Note> {
-        let serial = self.fresh_serial();
-        make_game_note(
-            self.scripts.reveal_note.clone(),
-            from,
-            to,
-            word(commitment).iter().copied().collect(),
-            serial,
-        )
+    /// Fires a shot from `shooter` (ACTIVE, its turn) with the default 12-hour deadline.
+    pub async fn fire(&mut self, shooter: AccountId, row: u64, col: u64) -> Result<Note> {
+        let deadline = self.deadline();
+        self.fire_with_deadline(shooter, row, col, deadline).await
     }
 
-    /// Both players set up, A challenges B, B accepts: both accounts ACTIVE.
-    pub async fn handshake(&mut self) -> Result<()> {
-        self.setup(self.a, self.b, A_COMMITMENT).await?;
-        self.setup(self.b, self.a, B_COMMITMENT).await?;
-        let challenge = self.challenge_note()?;
-        self.publish(self.a, challenge.clone()).await?;
-        self.consume(self.b, &challenge).await?;
-        let accept = self.accept_note()?;
-        self.publish(self.b, accept.clone()).await?;
-        self.consume(self.a, &accept).await?;
-        Ok(())
-    }
-
-    /// `shooter` fires at `defender`; returns the defender's tx and the result note it created.
-    pub async fn fire(
+    pub async fn fire_with_deadline(
         &mut self,
         shooter: AccountId,
-        defender: AccountId,
         row: u64,
         col: u64,
-        turn: u64,
-    ) -> Result<(ExecutedTransaction, Note)> {
-        let shot = self.shot_note(shooter, defender, row, col, turn)?;
-        self.publish(shooter, shot.clone()).await?;
-        let executed = self.consume_shot(defender, &shot).await?;
-        let result = self.result_note_of(&executed)?;
-        Ok((executed, result))
+        deadline: u64,
+    ) -> Result<Note> {
+        let shot = self.shot_note_for(shooter, row, col, deadline)?;
+        let script = self.scripts.fire_tx.clone();
+        self.run_script(
+            shooter,
+            script,
+            Some(fire_args(row, col, deadline)),
+            vec![],
+            vec![shot.clone()],
+        )
+        .await?;
+        Ok(shot)
     }
 
-    /// The result note among a transaction's output notes.
-    pub fn result_note_of(&self, executed: &ExecutedTransaction) -> Result<Note> {
-        let root = self.scripts.result_note.root();
-        executed
-            .output_notes()
-            .iter()
-            .find_map(|output| match output {
-                RawOutputNote::Full(note) if note.recipient().script().root() == root => {
-                    Some(note.clone())
-                }
-                _ => None,
-            })
-            .context("transaction created no result note")
+    /// Both players set up, A challenges B, B accepts, A fires turn 1 at (row, col) while
+    /// consuming the accept note. Returns A's first shot note.
+    pub async fn handshake(&mut self, row: u64, col: u64) -> Result<Note> {
+        let (a, b) = (self.a.id, self.b.id);
+        self.fund(a).await?;
+        self.fund(b).await?;
+        self.setup(a).await?;
+        self.setup(b).await?;
+        let challenge = self.challenge_note()?;
+        self.publish(a, challenge.clone()).await?;
+        self.consume(b, &challenge).await?;
+        let accept = self.accept_note()?;
+        self.publish(b, accept.clone()).await?;
+        self.accept_and_fire(&accept, row, col).await
+    }
+
+    /// A consumes the accept note and fires turn 1 in the same transaction.
+    pub async fn accept_and_fire(&mut self, accept: &Note, row: u64, col: u64) -> Result<Note> {
+        let a = self.a.id;
+        let deadline = self.deadline();
+        let shot = expected_shot_note(&self.scripts, a, self.b.id, row, col, 1, deadline)?;
+        let script = self.scripts.fire_tx.clone();
+        self.consume_with(
+            a,
+            accept,
+            None,
+            vec![shot.clone()],
+            Some((script, fire_args(row, col, deadline))),
+        )
+        .await?;
+        Ok(shot)
+    }
+
+    /// What the defender's client predicts for an incoming shot (mirrors `process_shot`).
+    pub fn predict(&self, defender: AccountId, row: u64, col: u64) -> Result<ShotResult> {
+        let account = self.account(defender)?;
+        let cell = read_board_cell(&account, row, col);
+        let is_hit = (1..=5).contains(&cell);
+        let hits = GameState::from_account(&account).ships_hit_count;
+        Ok(ShotResult {
+            is_hit,
+            game_over: is_hit && hits + 1 >= TOTAL_SHIP_CELLS,
+        })
+    }
+
+    /// The defender resolves `shot`; returns the result note (and the defeat note on the 17th hit).
+    pub async fn resolve(
+        &mut self,
+        defender: AccountId,
+        shot: &Note,
+    ) -> Result<(Note, Option<Note>)> {
+        let deadline = self.deadline();
+        self.resolve_with_deadline(defender, shot, deadline).await
+    }
+
+    pub async fn resolve_with_deadline(
+        &mut self,
+        defender: AccountId,
+        shot: &Note,
+        result_deadline: u64,
+    ) -> Result<(Note, Option<Note>)> {
+        let parsed = ShotNoteStorage::from_note(shot)?;
+        let shooter = shot.metadata().sender();
+        let result = self.predict(defender, parsed.row, parsed.col)?;
+        let result_note = expected_result_note(
+            &self.scripts,
+            defender,
+            shooter,
+            parsed.turn,
+            result,
+            result_deadline,
+        )?;
+        let defeat = if result.game_over {
+            Some(expected_defeat_note(
+                &self.scripts,
+                defender,
+                self.opponent_of(defender).wallet,
+            )?)
+        } else {
+            None
+        };
+        let mut expected = vec![result_note.clone()];
+        expected.extend(defeat.clone());
+        self.consume_with(
+            defender,
+            shot,
+            Some(shot_note_args(result_deadline)),
+            expected,
+            None,
+        )
+        .await?;
+        Ok((result_note, defeat))
+    }
+
+    /// The shooter consumes the result note and fires its next shot in the same transaction.
+    pub async fn answer(
+        &mut self,
+        shooter: AccountId,
+        result: &Note,
+        row: u64,
+        col: u64,
+    ) -> Result<Note> {
+        let deadline = self.deadline();
+        let turn = self.next_fire_turn(shooter)?;
+        let shot = expected_shot_note(
+            &self.scripts,
+            shooter,
+            self.opponent_of(shooter).id,
+            row,
+            col,
+            turn,
+            deadline,
+        )?;
+        let script = self.scripts.fire_tx.clone();
+        self.consume_with(
+            shooter,
+            result,
+            None,
+            vec![shot.clone()],
+            Some((script, fire_args(row, col, deadline))),
+        )
+        .await?;
+        Ok(shot)
+    }
+
+    /// The sender reclaims its own note after the deadline; returns the forfeit note.
+    pub async fn reclaim(&mut self, id: AccountId, note: &Note) -> Result<Note> {
+        let forfeit = expected_forfeit_note(&self.scripts, id, self.player(id).wallet)?;
+        self.consume_with(id, note, None, vec![forfeit.clone()], None)
+            .await?;
+        Ok(forfeit)
+    }
+
+    pub fn is_committed(&self, note: &Note) -> bool {
+        self.chain.is_note_committed(&NoteId::from(note.id()))
     }
 }
 
 /// Asserts that `result` failed with the MASM assertion `message`.
-pub fn assert_masm_error(result: Result<ExecutedTransaction>, message: &str) {
+pub fn assert_masm_error<T: std::fmt::Debug>(result: Result<T>, message: &str) {
     let err = match result {
         Ok(_) => panic!("expected the transaction to fail with {message:?}, but it succeeded"),
         Err(err) => err,

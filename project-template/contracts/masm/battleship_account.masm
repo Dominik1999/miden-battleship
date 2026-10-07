@@ -1,32 +1,56 @@
-use {AccountId, NoteScriptRoot, NoteSerialNumber} from miden::protocol::types
+use {AccountId, NoteSerialNumber} from miden::protocol::types
 use miden::core::sys
+use miden::core::crypto::hashes::poseidon2
+use miden::protocol::account_id
 use miden::protocol::active_account
 use miden::protocol::active_note
 use miden::protocol::native_account
 use miden::protocol::note
 use miden::protocol::output_note
+use miden::protocol::tx
 use {NOTE_TYPE_PUBLIC} from miden::protocol::note
 use miden::standards::data_structures::array
 use miden::standards::note::note_tag
 
 # The battleship game account component.
 #
-# One account per player per match. The board is private account storage; only the board
-# commitment and the public result notes leave the account. All procedures are entered with `call`
-# from a note script or a transaction script and therefore use the 16-element stack window.
+# One PRIVATE account per player per match. The board lives in private storage; the account
+# commitment published on-chain pins it from the setup transaction on, and every shot is resolved
+# inside the transaction proof. The component itself creates every game note it emits (shot,
+# result, defeat, forfeit), so each note is consumable by a genuine opponent and a stalled note
+# can be reclaimed by its sender after its deadline.
+#
+# All procedures are entered with `call` from a note script or a transaction script and therefore
+# use the 16-element stack window.
 
 # CONSTANTS
 # =================================================================================================
 
-# Storage slots. Keep these names in sync with `integration/src/battleship.rs`.
+# Storage slots. Keep these names in sync with `integration/src/battleship.rs` and the frontend.
 const GAME_CONFIG_SLOT = word("miden_battleship_account::battleship_account::game_config")
 const OPPONENT_SLOT = word("miden_battleship_account::battleship_account::opponent")
-const BOARD_COMMITMENT_SLOT = word("miden_battleship_account::battleship_account::board_commitment")
-const OPPONENT_COMMITMENT_SLOT = word("miden_battleship_account::battleship_account::opponent_commitment")
 const GAME_ID_SLOT = word("miden_battleship_account::battleship_account::game_id")
-const REVEAL_STATUS_SLOT = word("miden_battleship_account::battleship_account::reveal_status")
-# Map slot holding the board rows as an array: key [0, 0, 0, row] -> [packed_row, 0, 0, 0].
+const OWNER_WALLET_SLOT = word("miden_battleship_account::battleship_account::owner_wallet")
+const OPPONENT_WALLET_SLOT = word("miden_battleship_account::battleship_account::opponent_wallet")
+# [shots_fired, results_processed, role, 0]
+const TURN_STATE_SLOT = word("miden_battleship_account::battleship_account::turn_state")
+# [row, col, turn, 0] of the last shot this account fired
+const LAST_SHOT_SLOT = word("miden_battleship_account::battleship_account::last_shot")
+# [outcome, 0, 0, 0]
+const OUTCOME_SLOT = word("miden_battleship_account::battleship_account::outcome")
+# Map: key [0, 0, 0, row] -> [packed_row, 0, 0, 0]
 const BOARD_SLOT = word("miden_battleship_account::battleship_account::my_board")
+# Map: key [0, 0, 0, row] -> [fired_bits, hit_bits, 0, 0] for the cells this account fired at
+const MY_SHOTS_SLOT = word("miden_battleship_account::battleship_account::my_shots")
+# Map: key [0, 0, 0, kind] -> script root of the note kind (see ROOT_* below)
+const SCRIPT_ROOTS_SLOT = word("miden_battleship_account::battleship_account::script_roots")
+
+# Initial storage commitment of a fresh game account (all value slots zero, maps empty). Filled in
+# by the compiler before assembling; part of the account ID derivation used to anchor opponents.
+const INIT_STORAGE_COMMITMENT_0 = {{ISC0}}
+const INIT_STORAGE_COMMITMENT_1 = {{ISC1}}
+const INIT_STORAGE_COMMITMENT_2 = {{ISC2}}
+const INIT_STORAGE_COMMITMENT_3 = {{ISC3}}
 
 # Board geometry and ship set (classic: 5, 4, 3, 3, 2 cells).
 const GRID_SIZE = 10
@@ -42,15 +66,37 @@ const MAX_SHIP_ID = 5
 const PHASE_CREATED = 0
 const PHASE_CHALLENGED = 1
 const PHASE_ACTIVE = 2
-const PHASE_REVEAL = 3
-const PHASE_COMPLETE = 4
+const PHASE_COMPLETE = 3
+
+# Roles, stored in turn_state[2].
+const ROLE_CHALLENGER = 1
+const ROLE_ACCEPTOR = 2
+
+# Outcomes, stored in outcome[0].
+const OUTCOME_OPEN = 0
+const OUTCOME_WON = 1
+const OUTCOME_LOST = 2
+const OUTCOME_WON_BY_FORFEIT = 3
+
+# Note kinds (script_roots map keys and serial number kinds).
+const ROOT_SHOT = 0
+const ROOT_RESULT = 1
+const ROOT_DEFEAT = 2
+const ROOT_FORFEIT = 3
+const SERIAL_KIND_SHOT = 1
+const SERIAL_KIND_RESULT = 2
+const SERIAL_KIND_DEFEAT = 3
+const SERIAL_KIND_FORFEIT = 4
 
 # Expected incoming turn right after the handshake: the acceptor defends turn 1 (the challenger
-# fires first), the challenger defends turn 2.
+# fires first), the challenger defends turn 2. Turns alternate, so the expected incoming turn
+# advances by 2 per shot defended.
 const ACCEPTOR_FIRST_TURN = 1
 const CHALLENGER_FIRST_TURN = 2
-# Turns alternate, so an account's expected incoming turn advances by 2 per shot it defends.
 const TURN_STRIDE = 2
+
+# A note must stay consumable for at least 12 hours (seconds) after the reference block.
+const DEADLINE_DELTA = 43200
 
 # Cell encoding: a row packs 10 cells at 3 bits each into one felt (cell c at bits 3c..3c+2).
 const CELL_WATER = 0
@@ -59,22 +105,19 @@ const CELL_MISS = 7
 const CELL_BITS = 3
 const CELL_MASK = 7
 
-# Result encoding returned by process_shot: is_hit * 2 + game_over.
+# Result encoding carried by result notes: is_hit * 2 + game_over.
 const RESULT_HIT_WEIGHT = 2
 
-# Result note storage: [shooter_prefix, shooter_suffix, turn, encoded_result].
-const RESULT_NUM_STORAGE_ITEMS = 4
+# Note storage sizes.
+const RESULT_NUM_STORAGE_ITEMS = 5
+const SHOT_NUM_STORAGE_ITEMS = 4
+const WALLET_NOTE_NUM_STORAGE_ITEMS = 2
 
-# set_board_rows locals: rows at 0..9, per-cell-value counters at 10..15 (index = cell value).
+# Locals (word-aligned buffers at local 0).
 const SET_BOARD_ROWS_ROWS_LOC = 0
 const SET_BOARD_ROWS_COUNTS_LOC = 10
-
-# process_shot locals: the result note storage, word-aligned at local 0.
-const PROCESS_SHOT_RESULT_STORAGE_LOC = 0
-const PROCESS_SHOT_SHOOTER_PREFIX_LOC = 0
-const PROCESS_SHOT_SHOOTER_SUFFIX_LOC = 1
-const PROCESS_SHOT_TURN_LOC = 2
-const PROCESS_SHOT_ENCODED_RESULT_LOC = 3
+const NOTE_STORAGE_LOC = 0
+const SEED_PREIMAGE_LOC = 0
 
 # ERRORS
 # =================================================================================================
@@ -90,6 +133,7 @@ const ERR_SHIP_3_WRONG_SIZE = "ship 3 (cruiser) must occupy 3 cells"
 const ERR_SHIP_4_WRONG_SIZE = "ship 4 (submarine) must occupy 3 cells"
 const ERR_SHIP_5_WRONG_SIZE = "ship 5 (destroyer) must occupy 2 cells"
 
+const ERR_SET_ROOTS_WRONG_PHASE = "set_script_roots requires the CREATED phase"
 const ERR_FINALIZE_WRONG_PHASE = "finalize_board requires the CREATED phase"
 const ERR_FINALIZE_BOARD_ROWS_NOT_SET = "finalize_board requires set_board_rows to have run"
 
@@ -103,21 +147,33 @@ const ERR_HANDSHAKE_WRONG_PHASE = "handshake requires the CHALLENGED phase"
 const ERR_HANDSHAKE_GAME_ID_MISMATCH = "handshake game id does not match the stored game id"
 const ERR_HANDSHAKE_OPPONENT_PREFIX_MISMATCH = "handshake opponent prefix does not match the stored opponent"
 const ERR_HANDSHAKE_OPPONENT_SUFFIX_MISMATCH = "handshake opponent suffix does not match the stored opponent"
+const ERR_HANDSHAKE_SEED_MISMATCH = "handshake seed does not derive the opponent id"
+const ERR_HANDSHAKE_ROOTS_MISMATCH = "handshake script roots do not match"
+
+const ERR_FIRE_WRONG_PHASE = "fire_shot requires the ACTIVE phase"
+const ERR_FIRE_RESULT_PENDING = "fire_shot requires the previous result to be processed"
+const ERR_FIRE_NOT_YOUR_TURN = "fire_shot: it is not this account's turn"
+const ERR_FIRE_CELL_REPEATED = "fire_shot: cell was already fired at"
+const ERR_DEADLINE_TOO_SHORT = "deadline must be at least 12 hours after the reference block"
 
 const ERR_SHOT_WRONG_PHASE = "process_shot requires the ACTIVE phase"
 const ERR_SHOT_WRONG_TURN = "shot turn does not match the expected turn"
 const ERR_CELL_ALREADY_SHOT = "cell has already been shot"
 
-const ERR_ENTER_REVEAL_WRONG_PHASE = "enter_reveal requires the ACTIVE phase"
-const ERR_MARK_REVEAL_WRONG_PHASE = "mark_my_reveal requires the REVEAL phase"
-const ERR_VERIFY_REVEAL_WRONG_PHASE = "verify_opponent_reveal requires the REVEAL phase"
-const ERR_REVEAL_COMMITMENT_MISMATCH = "revealed commitment does not match the stored opponent commitment"
+const ERR_RESULT_WRONG_PHASE = "process_result requires the ACTIVE phase"
+const ERR_RESULT_WRONG_TURN = "result turn does not match the last fired shot"
+const ERR_RESULT_ALREADY_PROCESSED = "result for the last shot was already processed"
+const ERR_RESULT_WRONG_SHOOTER = "result note names a different shooter"
 
-# PUBLIC INTERFACE
+const ERR_FORFEIT_WRONG_PHASE = "claim_forfeit requires the ACTIVE phase"
+const ERR_FORFEIT_NOT_OWN_NOTE = "claim_forfeit: the note was not created by this account"
+const ERR_FORFEIT_WRONG_ROOT = "claim_forfeit: the note is not a shot or result note of this game"
+const ERR_FORFEIT_TOO_EARLY = "claim_forfeit: the deadline has not passed"
+
+# PUBLIC INTERFACE: SETUP
 # =================================================================================================
 
-#! Validates and stores the packed board rows. Must run before finalize_board, in the same or an
-#! earlier transaction.
+#! Validates and stores the packed board rows. Must run before finalize_board.
 #!
 #! Each row packs 10 cells at 3 bits per cell; a cell is water (0) or a ship id (1..5). The rows
 #! must contain exactly the classic ship set: 5 + 4 + 3 + 3 + 2 = 17 ship cells. The rows are
@@ -127,9 +183,7 @@ const ERR_REVEAL_COMMITMENT_MISMATCH = "revealed commitment does not match the s
 #! Outputs: [pad(16)]
 #!
 #! Where:
-#! - ROWS_A is [row_0, row_1, row_2, row_3].
-#! - ROWS_B is [row_4, row_5, row_6, row_7].
-#! - ROWS_C is [row_8, row_9, 0, 0].
+#! - ROWS_A is [row_0, row_1, row_2, row_3], ROWS_B is [row_4, .., row_7], ROWS_C is [row_8, row_9, 0, 0].
 #!
 #! Panics if:
 #! - the game is not in the CREATED phase.
@@ -144,7 +198,6 @@ pub proc set_board_rows(rows_a: word, rows_b: word, rows_c: word)
     exec.get_phase eq.PHASE_CREATED assert.err=ERR_SET_BOARD_WRONG_PHASE
     # => [row_0, ..., row_9, pad(6)]
 
-    # save the rows to locals 0..9
     locaddr.SET_BOARD_ROWS_ROWS_LOC mem_store
     locaddr.SET_BOARD_ROWS_ROWS_LOC add.1 mem_store
     locaddr.SET_BOARD_ROWS_ROWS_LOC add.2 mem_store
@@ -157,7 +210,6 @@ pub proc set_board_rows(rows_a: word, rows_b: word, rows_c: word)
     locaddr.SET_BOARD_ROWS_ROWS_LOC add.9 mem_store
     # => [pad(16)]
 
-    # zero the six cell-value counters
     push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC mem_store
     push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC add.1 mem_store
     push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC add.2 mem_store
@@ -166,26 +218,18 @@ pub proc set_board_rows(rows_a: word, rows_b: word, rows_c: word)
     push.0 locaddr.SET_BOARD_ROWS_COUNTS_LOC add.5 mem_store
     # => [pad(16)]
 
-    # count the cell values of every row
     push.0
-    # => [row_idx, pad(16)]
     dup neq.GRID_SIZE
     while.true
         # => [row_idx, pad(16)]
         dup locaddr.SET_BOARD_ROWS_ROWS_LOC add mem_load
-        # => [packed_row, row_idx, pad(16)]
-
         u32assert.err=ERR_ROW_NOT_U32
         locaddr.SET_BOARD_ROWS_COUNTS_LOC exec.count_row_cells
-        # => [row_idx, pad(16)]
-
         add.1 dup neq.GRID_SIZE
-        # => [row_idx != GRID_SIZE, row_idx, pad(16)]
     end
     drop
     # => [pad(16)]
 
-    # validate the ship set
     locaddr.SET_BOARD_ROWS_COUNTS_LOC add.1 mem_load
     locaddr.SET_BOARD_ROWS_COUNTS_LOC add.2 mem_load
     locaddr.SET_BOARD_ROWS_COUNTS_LOC add.3 mem_load
@@ -194,8 +238,6 @@ pub proc set_board_rows(rows_a: word, rows_b: word, rows_c: word)
     # => [count_5, count_4, count_3, count_2, count_1, pad(16)]
 
     dup.4 dup.4 add dup.3 add dup.2 add dup.1 add
-    # => [total, count_5, count_4, count_3, count_2, count_1, pad(16)]
-
     eq.TOTAL_SHIP_CELLS assert.err=ERR_WRONG_TOTAL_SHIP_CELLS
     eq.SHIP_5_SIZE assert.err=ERR_SHIP_5_WRONG_SIZE
     eq.SHIP_4_SIZE assert.err=ERR_SHIP_4_WRONG_SIZE
@@ -204,46 +246,54 @@ pub proc set_board_rows(rows_a: word, rows_b: word, rows_c: word)
     eq.SHIP_1_SIZE assert.err=ERR_SHIP_1_WRONG_SIZE
     # => [pad(16)]
 
-    # write the rows to the board array
     push.0
-    # => [row_idx, pad(16)]
     dup neq.GRID_SIZE
     while.true
         # => [row_idx, pad(16)]
         push.0.0.0 dup.3 locaddr.SET_BOARD_ROWS_ROWS_LOC add mem_load
-        # => [packed_row, 0, 0, 0, row_idx, pad(16)]
-
         dup.4 push.BOARD_SLOT[0..2]
-        # => [slot_suffix, slot_prefix, row_idx, VALUE, row_idx, pad(16)]
-
         exec.array::set dropw
-        # => [row_idx, pad(16)]
-
         add.1 dup neq.GRID_SIZE
-        # => [row_idx != GRID_SIZE, row_idx, pad(16)]
     end
     drop
     # => [pad(16)]
 
-    # game_config = [GRID_SIZE, TOTAL_SHIP_CELLS, PHASE_CREATED, 0]
     push.0 push.PHASE_CREATED push.TOTAL_SHIP_CELLS push.GRID_SIZE
     push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
     # => [pad(16)]
 
     exec.sys::truncate_stack
-    # => [pad(16)]
 end
 
-#! Finalizes the board setup: stores the game id, the opponent and the board commitment, and
-#! moves the game from CREATED to CHALLENGED.
+#! Stores the script roots of the four note kinds this account will create. Must run before
+#! finalize_board.
 #!
-#! Inputs:  [GAME_ID, opponent_id_suffix, opponent_id_prefix, COMMITMENT, pad(6)]
+#! Inputs:  [SHOT_ROOT, RESULT_ROOT, DEFEAT_ROOT, FORFEIT_ROOT]
 #! Outputs: [pad(16)]
 #!
-#! Where:
-#! - GAME_ID is the shared game identifier.
-#! - opponent_id_{suffix,prefix} are the suffix and prefix felts of the opponent's account ID.
-#! - COMMITMENT is this player's salted board commitment.
+#! Panics if:
+#! - the game is not in the CREATED phase.
+#!
+#! Invocation: call
+@account_procedure
+pub proc set_script_roots(shot_root: word, result_root: word, defeat_root: word, forfeit_root: word)
+    exec.get_phase eq.PHASE_CREATED assert.err=ERR_SET_ROOTS_WRONG_PHASE
+    # => [SHOT_ROOT, RESULT_ROOT, DEFEAT_ROOT, FORFEIT_ROOT]
+
+    push.ROOT_SHOT exec.store_script_root
+    push.ROOT_RESULT exec.store_script_root
+    push.ROOT_DEFEAT exec.store_script_root
+    push.ROOT_FORFEIT exec.store_script_root
+    # => []
+
+    exec.sys::truncate_stack
+end
+
+#! Finalizes the board setup: stores the game id, the opponent and the owner wallet, and moves
+#! the game from CREATED to CHALLENGED.
+#!
+#! Inputs:  [GAME_ID, opponent_id_suffix, opponent_id_prefix, wallet_suffix, wallet_prefix, pad(8)]
+#! Outputs: [pad(16)]
 #!
 #! Panics if:
 #! - the game is not in the CREATED phase.
@@ -251,63 +301,468 @@ end
 #!
 #! Invocation: call
 @account_procedure
-pub proc finalize_board(game_id: word, opponent_id: AccountId, commitment: word)
+pub proc finalize_board(game_id: word, opponent_id: AccountId, owner_wallet: AccountId)
     exec.get_game_config
-    # => [grid_size, num_placed, phase, expected_turn, GAME_ID, opponent_id_suffix, opponent_id_prefix, COMMITMENT, pad(6)]
+    # => [grid_size, num_placed, phase, expected_turn, GAME_ID, opp_suffix, opp_prefix, wallet_suffix, wallet_prefix, pad(8)]
 
     drop swap eq.PHASE_CREATED assert.err=ERR_FINALIZE_WRONG_PHASE
-    # => [num_placed, expected_turn, GAME_ID, ...]
-
     eq.TOTAL_SHIP_CELLS assert.err=ERR_FINALIZE_BOARD_ROWS_NOT_SET drop
-    # => [GAME_ID, opponent_id_suffix, opponent_id_prefix, COMMITMENT, pad(6)]
+    # => [GAME_ID, opp_suffix, opp_prefix, wallet_suffix, wallet_prefix, pad(8)]
 
     push.GAME_ID_SLOT[0..2] exec.native_account::set_item dropw
-    # => [opponent_id_suffix, opponent_id_prefix, COMMITMENT, pad(6)]
+    # => [opp_suffix, opp_prefix, wallet_suffix, wallet_prefix, pad(8)]
 
-    # opponent = [opponent_prefix, opponent_suffix, ships_hit_count = 0, total_shots_received = 0]
     swap push.0.0 movup.3 movup.3
-    # => [opponent_id_prefix, opponent_id_suffix, 0, 0, COMMITMENT, pad(6)]
-
+    # => [opp_prefix, opp_suffix, 0, 0, wallet_suffix, wallet_prefix, pad(8)]
     push.OPPONENT_SLOT[0..2] exec.native_account::set_item dropw
-    # => [COMMITMENT, pad(6)]
+    # => [wallet_suffix, wallet_prefix, pad(8)]
 
-    push.BOARD_COMMITMENT_SLOT[0..2] exec.native_account::set_item dropw
-    # => [pad(6)]
+    swap push.0.0 movup.3 movup.3
+    # => [wallet_prefix, wallet_suffix, 0, 0, pad(8)]
+    push.OWNER_WALLET_SLOT[0..2] exec.native_account::set_item dropw
+    # => [pad(8)]
 
-    # game_config = [GRID_SIZE, TOTAL_SHIP_CELLS, PHASE_CHALLENGED, 0]
     push.0 push.PHASE_CHALLENGED push.TOTAL_SHIP_CELLS push.GRID_SIZE
     push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
-    # => [pad(16)]
+    # => [pad(8)]
 
     exec.sys::truncate_stack
-    # => [pad(16)]
 end
+
+# PUBLIC INTERFACE: HANDSHAKE
+# =================================================================================================
+
+#! Asserts that the given script roots equal the ones stored at setup. Called by the handshake
+#! note scripts before accept_challenge / receive_acceptance, so an account only ever plays an
+#! opponent that creates notes with the same scripts.
+#!
+#! Inputs:  [SHOT_ROOT, RESULT_ROOT, DEFEAT_ROOT, FORFEIT_ROOT]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - any root differs from the stored one.
+#!
+#! Invocation: call
+@account_procedure
+pub proc assert_script_roots(shot_root: word, result_root: word, defeat_root: word, forfeit_root: word)
+    push.ROOT_SHOT exec.assert_script_root
+    push.ROOT_RESULT exec.assert_script_root
+    push.ROOT_DEFEAT exec.assert_script_root
+    push.ROOT_FORFEIT exec.assert_script_root
+    # => []
+
+    exec.sys::truncate_stack
+end
+
+#! Accepts a challenge: runs on the acceptor's account when it consumes the challenge note.
+#! Moves the game from CHALLENGED to ACTIVE with expected incoming turn 1.
+#!
+#! Inputs:  [GAME_ID, challenger_suffix, challenger_prefix, SEED, wallet_suffix, wallet_prefix, pad(4)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the active note's sender is not the stored opponent.
+#! - the game is not in the CHALLENGED phase.
+#! - GAME_ID or the challenger id does not match the stored game id or opponent.
+#! - SEED does not derive the challenger id with this account's code and the initial storage.
+#!
+#! Invocation: call
+@account_procedure
+@locals(16)
+pub proc accept_challenge(game_id: word, challenger_id: AccountId, seed: word, challenger_wallet: AccountId)
+    locaddr.SEED_PREIMAGE_LOC movdn.12
+    exec.apply_handshake
+    push.ROLE_ACCEPTOR push.ACCEPTOR_FIRST_TURN exec.set_active_phase
+    exec.sys::truncate_stack
+end
+
+#! Receives an acceptance: runs on the challenger's account when it consumes the accept note.
+#! Moves the game from CHALLENGED to ACTIVE with expected incoming turn 2.
+#!
+#! Inputs:  [GAME_ID, acceptor_suffix, acceptor_prefix, SEED, wallet_suffix, wallet_prefix, pad(4)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if: as accept_challenge.
+#!
+#! Invocation: call
+@account_procedure
+@locals(16)
+pub proc receive_acceptance(game_id: word, acceptor_id: AccountId, seed: word, acceptor_wallet: AccountId)
+    locaddr.SEED_PREIMAGE_LOC movdn.12
+    exec.apply_handshake
+    push.ROLE_CHALLENGER push.CHALLENGER_FIRST_TURN exec.set_active_phase
+    exec.sys::truncate_stack
+end
+
+# PUBLIC INTERFACE: GAMEPLAY
+# =================================================================================================
+
+#! Fires a shot: records the cell and creates the public shot note for the opponent.
+#!
+#! Inputs:  [row, col, deadline, pad(13)]
+#! Outputs: [pad(16)]
+#!
+#! Where:
+#! - deadline is the block timestamp after which the opponent can no longer resolve the shot and
+#!   this account may reclaim it; it must be at least DEADLINE_DELTA after the reference block.
+#!
+#! Panics if:
+#! - the game is not ACTIVE.
+#! - the result of the previous shot has not been processed.
+#! - it is not this account's turn (challenger: shots_fired == shots_received; acceptor: + 1).
+#! - the cell is out of bounds or was already fired at.
+#! - deadline is too close.
+#!
+#! Invocation: call
+@account_procedure
+@locals(8)
+pub proc fire_shot(row: u32, col: u32, deadline: u32)
+    exec.get_phase eq.PHASE_ACTIVE assert.err=ERR_FIRE_WRONG_PHASE
+    exec.assert_in_bounds
+    # => [row, col, deadline, pad(13)]
+
+    movup.2 dup locaddr.NOTE_STORAGE_LOC add.3 mem_store exec.assert_deadline
+    # => [row, col, pad(13)]
+
+    push.TURN_STATE_SLOT[0..2] exec.active_account::get_item
+    # => [fired, processed, role, 0, row, col, pad(13)]
+
+    movup.3 drop dup.1 dup.1 assert_eq.err=ERR_FIRE_RESULT_PENDING
+    # => [fired, processed, role, row, col, ...]
+
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    # => [opp_prefix, opp_suffix, hits, received, fired, processed, role, row, col, ...]
+
+    drop drop drop
+    # => [received, fired, processed, role, row, col, ...]
+
+    dup.3 eq.ROLE_CHALLENGER
+    if.true
+        # challenger: fired == received, turn = 2 * fired + 1
+        dup.1 assert_eq.err=ERR_FIRE_NOT_YOUR_TURN
+        dup mul.TURN_STRIDE add.1
+    else
+        # acceptor: fired + 1 == received, turn = 2 * fired + 2
+        dup.1 add.1 assert_eq.err=ERR_FIRE_NOT_YOUR_TURN
+        dup mul.TURN_STRIDE add.TURN_STRIDE
+    end
+    # => [turn, fired, processed, role, row, col, ...]
+
+    # turn_state = [fired + 1, processed, role, 0]
+    push.0 dup.4 dup.4 dup.4 add.1
+    # => [fired + 1, processed, role, 0, turn, fired, processed, role, row, col, ...]
+    push.TURN_STATE_SLOT[0..2] exec.native_account::set_item dropw
+    # => [turn, fired, processed, role, row, col, ...]
+
+    swap drop swap drop swap drop
+    # => [turn, row, col, ...]
+
+    # last_shot = [row, col, turn, 0]
+    dup.2 dup.2 dup.2 movdn.2 push.0 movdn.3
+    # => [row, col, turn, 0, turn, row, col, ...]
+    push.LAST_SHOT_SLOT[0..2] exec.native_account::set_item dropw
+    # => [turn, row, col, ...]
+
+    # my_shots[row].fired_bits |= 1 << col (must not be set yet)
+    dup.1 exec.load_my_shots
+    # => [fired_bits, hit_bits, turn, row, col, ...]
+
+    push.1 dup.5 u32shl
+    # => [mask, fired_bits, hit_bits, turn, row, col, ...]
+
+    dup.1 dup.1 u32and assertz.err=ERR_FIRE_CELL_REPEATED
+    u32or
+    # => [fired_bits', hit_bits, turn, row, col, ...]
+
+    push.0.0 movup.3 movup.3 movup.5 push.MY_SHOTS_SLOT[0..2]
+    # => [slot_suffix, slot_prefix, row, VALUE, turn, col, ...]
+    exec.array::set dropw
+    # => [turn, col, ...]
+
+    swap
+    # => [col, turn, ...]
+
+    # shot note storage = [row, col, turn, deadline]: the deadline is already at local 3
+    # (stored by assert_deadline); reload row, col and turn from last_shot.
+    push.LAST_SHOT_SLOT[0..2] exec.active_account::get_item
+    # => [row, col, turn, 0, col, turn, ...]
+
+    locaddr.NOTE_STORAGE_LOC mem_store
+    locaddr.NOTE_STORAGE_LOC add.1 mem_store
+    locaddr.NOTE_STORAGE_LOC add.2 mem_store
+    # => [0, col, turn, ...]
+
+    drop drop
+    # => [turn, ...]
+
+    push.SERIAL_KIND_SHOT swap exec.own_serial
+    # => [SERIAL, ...]
+
+    push.ROOT_SHOT exec.load_script_root
+    # => [SHOT_ROOT, SERIAL, ...]
+
+    swapw push.SHOT_NUM_STORAGE_ITEMS locaddr.NOTE_STORAGE_LOC
+    # => [storage_ptr, num_items, SERIAL, SHOT_ROOT, ...]
+
+    exec.load_opponent_prefix movdn.10
+    # => [storage_ptr, num_items, SERIAL, SHOT_ROOT, opp_prefix, ...]
+
+    exec.emit_note
+    # => [...]
+
+    exec.sys::truncate_stack
+end
+
+#! Processes an incoming shot: marks the cell, advances the counters and creates the public
+#! result note for the shooter. On the 17th hit the game ends (LOST) and a defeat note is sent
+#! to the opponent's wallet.
+#!
+#! Inputs:  [row, col, turn, result_deadline, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Where:
+#! - result_deadline is the deadline carried by the result note (chosen by this account's client,
+#!   at least DEADLINE_DELTA after the reference block).
+#!
+#! Panics if:
+#! - the active note's sender is not the stored opponent.
+#! - the game is not ACTIVE, turn is not the expected incoming turn, the cell is out of bounds or
+#!   was already shot, or result_deadline is too close.
+#!
+#! Invocation: call
+@account_procedure
+@locals(8)
+pub proc process_shot(row: u32, col: u32, turn: felt, result_deadline: u32)
+    exec.assert_sender_is_opponent
+    # => [row, col, turn, result_deadline, pad(12)]
+
+    movup.3 dup locaddr.NOTE_STORAGE_LOC add.4 mem_store exec.assert_deadline
+    # => [row, col, turn, pad(12)]
+
+    exec.get_game_config drop drop
+    # => [phase, expected_turn, row, col, turn, ...]
+
+    eq.PHASE_ACTIVE assert.err=ERR_SHOT_WRONG_PHASE
+    dup.3 assert_eq.err=ERR_SHOT_WRONG_TURN
+    # => [row, col, turn, ...]
+
+    exec.assert_in_bounds
+    dup exec.load_packed_row
+    # => [packed_row, row, col, turn, ...]
+
+    dup.2 mul.CELL_BITS
+    # => [shift, packed_row, row, col, turn, ...]
+
+    dup.1 dup.1 u32shr push.CELL_MASK u32and
+    # => [cell, shift, packed_row, row, col, turn, ...]
+
+    dup push.MAX_SHIP_ID u32lte assert.err=ERR_CELL_ALREADY_SHOT
+    neq.CELL_WATER
+    # => [is_hit, shift, packed_row, row, col, turn, ...]
+
+    push.CELL_MISS push.CELL_HIT dup.2 cdrop
+    dup.2 u32shl
+    dup.2 push.CELL_MASK swap u32shl u32not
+    movup.4 u32and u32or
+    # => [new_packed_row, is_hit, shift, row, col, turn, ...]
+
+    movup.2 drop
+    push.0.0.0 movup.3 dup.5 push.BOARD_SLOT[0..2]
+    exec.array::set dropw
+    # => [is_hit, row, col, turn, ...]
+
+    swap drop swap drop
+    # => [is_hit, turn, ...]
+
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    # => [opp_prefix, opp_suffix, hits, received, is_hit, turn, ...]
+
+    dup.4 movup.3 add swap movup.3 add.1
+    movdn.3 movup.2 swap
+    # => [opp_prefix, opp_suffix, hits', received', is_hit, turn, ...]
+
+    dup.2 eq.TOTAL_SHIP_CELLS movdn.4
+    # => [opp_prefix, opp_suffix, hits', received', game_over, is_hit, turn, ...]
+
+    push.OPPONENT_SLOT[0..2] exec.native_account::set_item dropw
+    # => [game_over, is_hit, turn, ...]
+
+    # game_config = [GRID_SIZE, TOTAL_SHIP_CELLS, game_over ? COMPLETE : ACTIVE, turn + TURN_STRIDE]
+    dup.2 add.TURN_STRIDE
+    push.PHASE_ACTIVE push.PHASE_COMPLETE dup.3 cdrop
+    push.TOTAL_SHIP_CELLS push.GRID_SIZE
+    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
+    # => [game_over, is_hit, turn, ...]
+
+    swap mul.RESULT_HIT_WEIGHT dup.1 add
+    # => [encoded_result, game_over, turn, ...]
+
+    # result note storage = [shooter_prefix, shooter_suffix, turn, encoded_result, result_deadline]
+    locaddr.NOTE_STORAGE_LOC add.3 mem_store
+    dup.1 locaddr.NOTE_STORAGE_LOC add.2 mem_store
+    # => [game_over, turn, ...]
+
+    exec.load_opponent_prefix locaddr.NOTE_STORAGE_LOC mem_store
+    exec.load_opponent_suffix locaddr.NOTE_STORAGE_LOC add.1 mem_store
+    # (the result deadline is already at local 4, stored by assert_deadline)
+    # => [game_over, turn, ...]
+
+    swap push.SERIAL_KIND_RESULT swap exec.own_serial
+    # => [SERIAL, game_over, ...]
+
+    push.ROOT_RESULT exec.load_script_root
+    swapw push.RESULT_NUM_STORAGE_ITEMS locaddr.NOTE_STORAGE_LOC
+    exec.load_opponent_prefix movdn.10
+    # => [storage_ptr, num_items, SERIAL, RESULT_ROOT, opp_prefix, game_over, ...]
+
+    exec.emit_note
+    # => [game_over, ...]
+
+    if.true
+        push.OUTCOME_LOST exec.set_outcome
+        push.OPPONENT_WALLET_SLOT[0..2] exec.active_account::get_item
+        # => [wallet_prefix, wallet_suffix, 0, 0, ...]
+        movup.2 drop movup.2 drop locaddr.NOTE_STORAGE_LOC movdn.2
+        push.SERIAL_KIND_DEFEAT push.ROOT_DEFEAT exec.emit_wallet_note
+        # => [...]
+    end
+
+    exec.sys::truncate_stack
+end
+
+#! Processes the result of this account's last shot: records the hit and, when the result says
+#! game over, ends the game as WON.
+#!
+#! Inputs:  [shooter_suffix, shooter_prefix, turn, encoded_result, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Panics if:
+#! - the active note's sender is not the stored opponent.
+#! - the game is not ACTIVE, the shooter is not this account, turn is not the last fired turn,
+#!   or the result was already processed.
+#!
+#! Invocation: call
+@account_procedure
+pub proc process_result(shooter_id: AccountId, turn: felt, encoded_result: felt)
+    exec.assert_sender_is_opponent
+    exec.get_phase eq.PHASE_ACTIVE assert.err=ERR_RESULT_WRONG_PHASE
+    # => [shooter_suffix, shooter_prefix, turn, encoded_result, pad(12)]
+
+    exec.active_account::get_id
+    # => [my_suffix, my_prefix, shooter_suffix, shooter_prefix, turn, encoded_result, ...]
+
+    exec.account_id::eq assert.err=ERR_RESULT_WRONG_SHOOTER
+    # => [turn, encoded_result, ...]
+
+    push.LAST_SHOT_SLOT[0..2] exec.active_account::get_item
+    # => [row, col, last_turn, 0, turn, encoded_result, ...]
+
+    movup.3 drop movup.2 movup.3 assert_eq.err=ERR_RESULT_WRONG_TURN
+    # => [row, col, encoded_result, ...]
+
+    push.TURN_STATE_SLOT[0..2] exec.active_account::get_item
+    # => [fired, processed, role, 0, row, col, encoded_result, ...]
+
+    dup.1 add.1 dup.1 assert_eq.err=ERR_RESULT_ALREADY_PROCESSED
+    # => [fired, processed, role, 0, row, col, encoded_result, ...]
+
+    swap add.1 swap
+    push.TURN_STATE_SLOT[0..2] exec.native_account::set_item dropw
+    # => [row, col, encoded_result, ...]
+
+    # my_shots[row].hit_bits |= is_hit << col
+    dup.2 u32shr.1
+    # => [is_hit, row, col, encoded_result, ...]
+
+    dup.1 exec.load_my_shots
+    # => [fired_bits, hit_bits, is_hit, row, col, encoded_result, ...]
+
+    movup.2 movup.4 u32shl
+    # => [hit_mask, fired_bits, hit_bits, row, encoded_result, ...]
+
+    movup.2 u32or
+    # => [hit_bits', fired_bits, row, encoded_result, ...]
+
+    swap push.0.0 movup.3 movup.3 movup.4 push.MY_SHOTS_SLOT[0..2]
+    # => [slot_suffix, slot_prefix, row, VALUE, encoded_result, ...]
+    exec.array::set dropw
+    # => [encoded_result, ...]
+
+    push.2 u32mod eq.1
+    if.true
+        push.OUTCOME_WON exec.set_outcome
+        exec.set_complete_phase
+    end
+
+    exec.sys::truncate_stack
+end
+
+#! Claims a forfeit: runs when this account consumes its own, still unconsumed, shot or result
+#! note after the note's deadline. Ends the game as WON_BY_FORFEIT and sends a forfeit note to
+#! the owner wallet.
+#!
+#! Inputs:  [deadline, kind, pad(14)]
+#! Outputs: [pad(16)]
+#!
+#! Where:
+#! - kind is ROOT_SHOT or ROOT_RESULT, the stored script root the active note must carry.
+#!
+#! Panics if:
+#! - the game is not ACTIVE.
+#! - the active note was not created by this account or does not carry the expected script root.
+#! - the reference block timestamp is not past the deadline.
+#!
+#! Invocation: call
+@account_procedure
+@locals(4)
+pub proc claim_forfeit(deadline: u32, kind: felt)
+    exec.get_phase eq.PHASE_ACTIVE assert.err=ERR_FORFEIT_WRONG_PHASE
+    # => [deadline, kind, pad(14)]
+
+    exec.active_note::get_sender exec.active_account::get_id
+    exec.account_id::eq assert.err=ERR_FORFEIT_NOT_OWN_NOTE
+    # => [deadline, kind, ...]
+
+    swap exec.load_script_root
+    # => [STORED_ROOT, deadline, ...]
+
+    exec.active_note::get_script_root
+    assert_eqw.err=ERR_FORFEIT_WRONG_ROOT
+    # => [deadline, ...]
+
+    exec.tx::get_block_timestamp
+    # => [timestamp, deadline, ...]
+
+    u32lt assert.err=ERR_FORFEIT_TOO_EARLY
+    # => [...]
+
+    push.OUTCOME_WON_BY_FORFEIT exec.set_outcome
+    exec.set_complete_phase
+
+    push.OWNER_WALLET_SLOT[0..2] exec.active_account::get_item
+    movup.2 drop movup.2 drop locaddr.NOTE_STORAGE_LOC movdn.2
+    push.SERIAL_KIND_FORFEIT push.ROOT_FORFEIT exec.emit_wallet_note
+    # => [...]
+
+    exec.sys::truncate_stack
+end
+
+# PUBLIC INTERFACE: READ-ONLY
+# =================================================================================================
 
 #! Returns the state of a board cell: water (0), a ship id (1..5), hit (6) or miss (7).
 #!
 #! Inputs:  [row, col, pad(14)]
 #! Outputs: [cell, pad(15)]
 #!
-#! Panics if:
-#! - row or col is not a u32 below GRID_SIZE.
-#!
 #! Invocation: call
 @account_procedure
 pub proc get_cell(row: u32, col: u32) -> u8
     exec.assert_in_bounds
-    # => [row, col, pad(14)]
-
     exec.load_packed_row
-    # => [packed_row, col, pad(14)]
-
     swap mul.CELL_BITS u32shr
-    # => [packed_row >> shift, pad(14)]
-
     push.CELL_MASK u32and
-    # => [cell, pad(15)]
-
     exec.sys::truncate_stack
-    # => [cell, pad(15)]
 end
 
 #! Returns the current game phase.
@@ -319,527 +774,253 @@ end
 @account_procedure
 pub proc get_game_phase() -> u8
     exec.get_phase
-    # => [phase, pad(16)]
-
     exec.sys::truncate_stack
-    # => [phase, pad(15)]
-end
-
-#! Accepts a challenge: runs on the acceptor's account when it consumes the challenge note.
-#!
-#! Stores the challenger's board commitment and moves the game from CHALLENGED to ACTIVE with
-#! expected incoming turn 1 (the challenger fires first).
-#!
-#! Inputs:  [GAME_ID, challenger_id_suffix, challenger_id_prefix, CHALLENGER_COMMITMENT, pad(6)]
-#! Outputs: [pad(16)]
-#!
-#! Panics if:
-#! - the active note's sender is not the stored opponent.
-#! - the game is not in the CHALLENGED phase.
-#! - GAME_ID or the challenger id does not match the stored game id or opponent.
-#!
-#! Invocation: call
-@account_procedure
-pub proc accept_challenge(game_id: word, challenger_id: AccountId, challenger_commitment: word)
-    exec.apply_handshake
-    # => [pad(16)]
-
-    push.ACCEPTOR_FIRST_TURN exec.set_active_phase
-    # => [pad(16)]
-
-    exec.sys::truncate_stack
-    # => [pad(16)]
-end
-
-#! Receives an acceptance: runs on the challenger's account when it consumes the accept note.
-#!
-#! Stores the acceptor's board commitment and moves the game from CHALLENGED to ACTIVE with
-#! expected incoming turn 2 (the challenger fires turn 1 itself).
-#!
-#! Inputs:  [GAME_ID, acceptor_id_suffix, acceptor_id_prefix, ACCEPTOR_COMMITMENT, pad(6)]
-#! Outputs: [pad(16)]
-#!
-#! Panics if:
-#! - the active note's sender is not the stored opponent.
-#! - the game is not in the CHALLENGED phase.
-#! - GAME_ID or the acceptor id does not match the stored game id or opponent.
-#!
-#! Invocation: call
-@account_procedure
-pub proc receive_acceptance(game_id: word, acceptor_id: AccountId, acceptor_commitment: word)
-    exec.apply_handshake
-    # => [pad(16)]
-
-    push.CHALLENGER_FIRST_TURN exec.set_active_phase
-    # => [pad(16)]
-
-    exec.sys::truncate_stack
-    # => [pad(16)]
-end
-
-#! Processes an incoming shot and creates the public result note for the shooter.
-#!
-#! The targeted cell becomes CELL_HIT or CELL_MISS, the counters in the opponent slot advance,
-#! the expected incoming turn advances by 2 and, when the 17th ship cell is hit, the game moves
-#! from ACTIVE to REVEAL. The result note is created with storage
-#! [shooter_prefix, shooter_suffix, turn, encoded_result], the given serial number and script
-#! root, note type public and the tag targeting the stored opponent's account.
-#!
-#! Inputs:  [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-#! Outputs: [encoded_result, pad(15)]
-#!
-#! Where:
-#! - row and col are the targeted cell.
-#! - turn is the turn number of the shot.
-#! - RESULT_SERIAL_NUM is the serial number of the result note to create.
-#! - RESULT_SCRIPT_ROOT is the script root of the result note to create.
-#! - encoded_result is is_hit * 2 + game_over.
-#!
-#! Panics if:
-#! - the active note's sender is not the stored opponent.
-#! - the game is not in the ACTIVE phase.
-#! - turn is not the expected incoming turn.
-#! - row or col is not a u32 below GRID_SIZE.
-#! - the cell has already been shot.
-#!
-#! Invocation: call
-@account_procedure
-@locals(4)
-pub proc process_shot(
-    row: u32,
-    col: u32,
-    turn: felt,
-    result_serial_num: NoteSerialNumber,
-    result_script_root: NoteScriptRoot
-) -> u8
-    exec.assert_sender_is_opponent
-    # => [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    exec.get_game_config drop drop
-    # => [phase, expected_turn, row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    eq.PHASE_ACTIVE assert.err=ERR_SHOT_WRONG_PHASE
-    # => [expected_turn, row, col, turn, ...]
-
-    dup.3 assert_eq.err=ERR_SHOT_WRONG_TURN
-    # => [row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    exec.assert_in_bounds
-    # => [row, col, turn, ...]
-
-    dup exec.load_packed_row
-    # => [packed_row, row, col, turn, ...]
-
-    dup.2 mul.CELL_BITS
-    # => [shift, packed_row, row, col, turn, ...]
-
-    dup.1 dup.1 u32shr push.CELL_MASK u32and
-    # => [cell, shift, packed_row, row, col, turn, ...]
-
-    dup push.MAX_SHIP_ID u32lte assert.err=ERR_CELL_ALREADY_SHOT
-    # => [cell, shift, packed_row, row, col, turn, ...]
-
-    neq.CELL_WATER
-    # => [is_hit, shift, packed_row, row, col, turn, ...]
-
-    push.CELL_MISS push.CELL_HIT dup.2 cdrop
-    # => [new_cell, is_hit, shift, packed_row, row, col, turn, ...]
-
-    dup.2 u32shl
-    # => [new_cell << shift, is_hit, shift, packed_row, row, col, turn, ...]
-
-    dup.2 push.CELL_MASK swap u32shl u32not
-    # => [clear_mask, new_cell << shift, is_hit, shift, packed_row, row, col, turn, ...]
-
-    movup.4 u32and u32or
-    # => [new_packed_row, is_hit, shift, row, col, turn, ...]
-
-    movup.2 drop
-    # => [new_packed_row, is_hit, row, col, turn, ...]
-
-    push.0.0.0 movup.3 dup.5 push.BOARD_SLOT[0..2]
-    # => [slot_suffix, slot_prefix, row, NEW_ROW_VALUE, is_hit, row, col, turn, ...]
-
-    exec.array::set dropw
-    # => [is_hit, row, col, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    swap drop swap drop
-    # => [is_hit, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    # advance the counters: ships_hit_count += is_hit, total_shots_received += 1
-    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
-    # => [opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received, is_hit, turn, ...]
-
-    dup.4 movup.3 add swap movup.3 add.1
-    # => [total_shots_received', opponent_prefix, ships_hit_count', opponent_suffix, is_hit, turn, ...]
-
-    movdn.3 movup.2 swap
-    # => [opponent_prefix, opponent_suffix, ships_hit_count', total_shots_received', is_hit, turn, ...]
-
-    dup.2 eq.TOTAL_SHIP_CELLS movdn.4
-    # => [opponent_prefix, opponent_suffix, ships_hit_count', total_shots_received', game_over, is_hit, turn, ...]
-
-    push.OPPONENT_SLOT[0..2] exec.native_account::set_item dropw
-    # => [game_over, is_hit, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    # game_config = [GRID_SIZE, TOTAL_SHIP_CELLS, game_over ? REVEAL : ACTIVE, turn + TURN_STRIDE]
-    dup.2 add.TURN_STRIDE
-    # => [next_turn, game_over, is_hit, turn, ...]
-
-    push.PHASE_ACTIVE push.PHASE_REVEAL dup.3 cdrop
-    # => [next_phase, next_turn, game_over, is_hit, turn, ...]
-
-    push.TOTAL_SHIP_CELLS push.GRID_SIZE
-    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
-    # => [game_over, is_hit, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    swap mul.RESULT_HIT_WEIGHT add
-    # => [encoded_result, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    # result note storage = [shooter_prefix, shooter_suffix, turn, encoded_result]
-    dup locaddr.PROCESS_SHOT_ENCODED_RESULT_LOC mem_store
-    dup.1 locaddr.PROCESS_SHOT_TURN_LOC mem_store
-    # => [encoded_result, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
-    # => [opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received, encoded_result, turn, ...]
-
-    movup.2 drop movup.2 drop
-    # => [opponent_prefix, opponent_suffix, encoded_result, turn, ...]
-
-    locaddr.PROCESS_SHOT_SHOOTER_PREFIX_LOC mem_store
-    locaddr.PROCESS_SHOT_SHOOTER_SUFFIX_LOC mem_store
-    # => [encoded_result, turn, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, pad(5)]
-
-    movdn.9 movdn.9
-    # => [RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, turn, encoded_result, pad(5)]
-
-    push.RESULT_NUM_STORAGE_ITEMS locaddr.PROCESS_SHOT_RESULT_STORAGE_LOC
-    # => [storage_ptr, num_storage_items, RESULT_SERIAL_NUM, RESULT_SCRIPT_ROOT, turn, encoded_result, pad(5)]
-
-    exec.note::compute_and_store_recipient
-    # => [RECIPIENT, turn, encoded_result, pad(5)]
-
-    # the tag targets the shooter, i.e. the stored opponent
-    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
-    # => [opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received, RECIPIENT, turn, encoded_result, pad(5)]
-
-    movdn.3 drop drop drop exec.note_tag::create_account_target
-    # => [tag, RECIPIENT, turn, encoded_result, pad(5)]
-
-    push.NOTE_TYPE_PUBLIC swap
-    # => [tag, note_type, RECIPIENT, turn, encoded_result, pad(5)]
-
-    exec.output_note::create drop
-    # => [turn, encoded_result, pad(5)]
-
-    drop
-    # => [encoded_result, pad(15)]
-
-    exec.sys::truncate_stack
-    # => [encoded_result, pad(15)]
-end
-
-#! Moves the game from ACTIVE to REVEAL. The winner calls this on its own account after the
-#! opponent's board has been sunk.
-#!
-#! Inputs:  [pad(16)]
-#! Outputs: [pad(16)]
-#!
-#! Panics if:
-#! - the game is not in the ACTIVE phase.
-#!
-#! Invocation: call
-@account_procedure
-pub proc enter_reveal()
-    exec.get_game_config
-    # => [grid_size, num_placed, phase, expected_turn, pad(16)]
-
-    movup.2 eq.PHASE_ACTIVE assert.err=ERR_ENTER_REVEAL_WRONG_PHASE
-    # => [grid_size, num_placed, expected_turn, pad(16)]
-
-    push.PHASE_REVEAL movdn.2
-    # => [grid_size, num_placed, PHASE_REVEAL, expected_turn, pad(16)]
-
-    push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
-    # => [pad(16)]
-
-    exec.sys::truncate_stack
-    # => [pad(16)]
-end
-
-#! Marks that this account has sent its reveal note. Completes the game if the opponent's reveal
-#! was already verified.
-#!
-#! Inputs:  [pad(16)]
-#! Outputs: [pad(16)]
-#!
-#! Panics if:
-#! - the game is not in the REVEAL phase.
-#!
-#! Invocation: call
-@account_procedure
-pub proc mark_my_reveal()
-    exec.get_phase eq.PHASE_REVEAL assert.err=ERR_MARK_REVEAL_WRONG_PHASE
-    # => [pad(16)]
-
-    push.REVEAL_STATUS_SLOT[0..2] exec.active_account::get_item
-    # => [my_revealed, opponent_verified, 0, 0, pad(16)]
-
-    drop push.1 dup.1 movdn.4
-    # => [1, opponent_verified, 0, 0, opponent_verified, pad(16)]
-
-    push.REVEAL_STATUS_SLOT[0..2] exec.native_account::set_item dropw
-    # => [opponent_verified, pad(16)]
-
-    eq.1
-    if.true
-        exec.set_complete_phase
-    end
-    # => [pad(16)]
-
-    exec.sys::truncate_stack
-    # => [pad(16)]
-end
-
-#! Verifies the opponent's revealed board commitment against the stored opponent commitment and
-#! marks the opponent as verified. Completes the game if this account has already revealed.
-#!
-#! Inputs:  [COMMITMENT, pad(12)]
-#! Outputs: [pad(16)]
-#!
-#! Panics if:
-#! - the active note's sender is not the stored opponent.
-#! - the game is not in the REVEAL phase.
-#! - COMMITMENT does not match the stored opponent commitment.
-#!
-#! Invocation: call
-@account_procedure
-pub proc verify_opponent_reveal(commitment: word)
-    exec.assert_sender_is_opponent
-    # => [COMMITMENT, pad(12)]
-
-    exec.get_phase eq.PHASE_REVEAL assert.err=ERR_VERIFY_REVEAL_WRONG_PHASE
-    # => [COMMITMENT, pad(12)]
-
-    push.OPPONENT_COMMITMENT_SLOT[0..2] exec.active_account::get_item
-    # => [STORED_COMMITMENT, COMMITMENT, pad(12)]
-
-    assert_eqw.err=ERR_REVEAL_COMMITMENT_MISMATCH
-    # => [pad(16)]
-
-    push.REVEAL_STATUS_SLOT[0..2] exec.active_account::get_item
-    # => [my_revealed, opponent_verified, 0, 0, pad(16)]
-
-    swap drop push.1 swap dup movdn.4
-    # => [my_revealed, 1, 0, 0, my_revealed, pad(16)]
-
-    push.REVEAL_STATUS_SLOT[0..2] exec.native_account::set_item dropw
-    # => [my_revealed, pad(16)]
-
-    eq.1
-    if.true
-        exec.set_complete_phase
-    end
-    # => [pad(16)]
-
-    exec.sys::truncate_stack
-    # => [pad(16)]
 end
 
 # HELPER PROCEDURES
 # =================================================================================================
 
 #! Returns the game_config word.
-#!
-#! Inputs:  []
-#! Outputs: [grid_size, num_placed, phase, expected_turn]
-#!
-#! Invocation: exec
+#! Inputs: [] Outputs: [grid_size, num_placed, phase, expected_turn]
 proc get_game_config() -> word
     push.GAME_CONFIG_SLOT[0..2] exec.active_account::get_item
-    # => [grid_size, num_placed, phase, expected_turn]
 end
 
-#! Returns the current game phase.
-#!
-#! Inputs:  []
-#! Outputs: [phase]
-#!
-#! Invocation: exec
+#! Inputs: [] Outputs: [phase]
 proc get_phase() -> u8
     exec.get_game_config
-    # => [grid_size, num_placed, phase, expected_turn]
-
     drop drop swap drop
-    # => [phase]
 end
 
-#! Sets game_config to [GRID_SIZE, TOTAL_SHIP_CELLS, PHASE_ACTIVE, expected_turn].
-#!
-#! Inputs:  [expected_turn]
-#! Outputs: []
-#!
-#! Invocation: exec
-proc set_active_phase(expected_turn: felt)
+#! Sets game_config to ACTIVE with the given expected turn and turn_state to [0, 0, role, 0].
+#! Inputs: [expected_turn, role] Outputs: []
+proc set_active_phase(expected_turn: felt, role: felt)
     push.PHASE_ACTIVE push.TOTAL_SHIP_CELLS push.GRID_SIZE
-    # => [GRID_SIZE, TOTAL_SHIP_CELLS, PHASE_ACTIVE, expected_turn]
-
     push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
-    # => []
+    # => [role]
+
+    push.0 swap push.0.0
+    # => [0, 0, role, 0]
+    push.TURN_STATE_SLOT[0..2] exec.native_account::set_item dropw
 end
 
 #! Sets the phase in game_config to PHASE_COMPLETE, keeping the other fields.
-#!
-#! Inputs:  []
-#! Outputs: []
-#!
-#! Invocation: exec
+#! Inputs: [] Outputs: []
 proc set_complete_phase()
     exec.get_game_config
-    # => [grid_size, num_placed, phase, expected_turn]
-
     movup.2 drop push.PHASE_COMPLETE movdn.2
-    # => [grid_size, num_placed, PHASE_COMPLETE, expected_turn]
-
     push.GAME_CONFIG_SLOT[0..2] exec.native_account::set_item dropw
-    # => []
+end
+
+#! Inputs: [outcome] Outputs: []
+proc set_outcome(outcome: felt)
+    push.0.0.0 movup.3
+    push.OUTCOME_SLOT[0..2] exec.native_account::set_item dropw
 end
 
 #! Runs the checks shared by accept_challenge and receive_acceptance and stores the opponent's
-#! board commitment.
+#! wallet.
 #!
-#! Inputs:  [GAME_ID, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+#! Inputs:  [GAME_ID, opp_suffix, opp_prefix, SEED, wallet_suffix, wallet_prefix, preimage_ptr, pad(3)]
 #! Outputs: [pad(16)]
-#!
-#! Panics if:
-#! - the active note's sender is not the stored opponent.
-#! - the game is not in the CHALLENGED phase.
-#! - GAME_ID does not match the stored game id.
-#! - the opponent id does not match the stored opponent.
-#!
-#! Invocation: exec
-proc apply_handshake(game_id: word, opponent_id: AccountId, opponent_commitment: word)
+proc apply_handshake(game_id: word, opponent_id: AccountId, seed: word, opponent_wallet: AccountId, preimage_ptr: ptr<felt>)
     exec.assert_sender_is_opponent
-    # => [GAME_ID, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
-
     exec.get_phase eq.PHASE_CHALLENGED assert.err=ERR_HANDSHAKE_WRONG_PHASE
-    # => [GAME_ID, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
 
     push.GAME_ID_SLOT[0..2] exec.active_account::get_item
-    # => [STORED_GAME_ID, GAME_ID, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
-
     assert_eqw.err=ERR_HANDSHAKE_GAME_ID_MISMATCH
-    # => [opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+    # => [opp_suffix, opp_prefix, SEED, wallet_suffix, wallet_prefix, pad(4)]
 
     push.OPPONENT_SLOT[0..2] exec.active_account::get_item
-    # => [stored_prefix, stored_suffix, ships_hit_count, total_shots_received, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
-
     movup.2 drop movup.2 drop
-    # => [stored_prefix, stored_suffix, opponent_id_suffix, opponent_id_prefix, OPPONENT_COMMITMENT, pad(6)]
+    # => [stored_prefix, stored_suffix, opp_suffix, opp_prefix, SEED, ...]
 
     movup.3 assert_eq.err=ERR_HANDSHAKE_OPPONENT_PREFIX_MISMATCH
-    # => [stored_suffix, opponent_id_suffix, OPPONENT_COMMITMENT, pad(6)]
-
     assert_eq.err=ERR_HANDSHAKE_OPPONENT_SUFFIX_MISMATCH
-    # => [OPPONENT_COMMITMENT, pad(6)]
+    # => [SEED, wallet_suffix, wallet_prefix, preimage_ptr, pad(3)]
 
-    push.OPPONENT_COMMITMENT_SLOT[0..2] exec.native_account::set_item dropw
-    # => [pad(16)]
+    movup.6 movdn.4 exec.assert_seed_derives_opponent
+    # => [wallet_suffix, wallet_prefix, pad(3)]
+
+    swap push.0.0 movup.3 movup.3
+    push.OPPONENT_WALLET_SLOT[0..2] exec.native_account::set_item dropw
+    # => [pad(4)]
+end
+
+#! Asserts hash(SEED, my code commitment, INIT_STORAGE_COMMITMENT, 0) derives the stored
+#! opponent id, i.e. the opponent runs this exact code from the standard initial storage. The
+#! hashing mirrors the kernel's `validate_seed` step for step.
+#!
+#! Inputs:  [SEED, preimage_ptr, ...]
+#! Outputs: [...]
+proc assert_seed_derives_opponent(seed: word, preimage_ptr: ptr<felt>)
+    movup.4 drop
+    # => [SEED, ...]
+
+    padw exec.active_account::get_code_commitment
+    # => [CODE_COMMITMENT, CAPACITY, SEED, ...]
+
+    movupw.2
+    # => [SEED, CODE_COMMITMENT, CAPACITY, ...]
+
+    exec.poseidon2::permute
+    # => [RATE0, RATE1, CAPACITY, ...]
+
+    dropw dropw
+    # => [CAPACITY, ...]
+
+    padw
+    push.INIT_STORAGE_COMMITMENT_3 push.INIT_STORAGE_COMMITMENT_2
+    push.INIT_STORAGE_COMMITMENT_1 push.INIT_STORAGE_COMMITMENT_0
+    # => [STORAGE_COMMITMENT, EMPTY_WORD, CAPACITY, ...]
+
+    exec.poseidon2::permute
+    exec.poseidon2::squeeze_digest
+    # => [digest_0, digest_1, digest_2, digest_3, ...]
+
+    # the squeezed digest lands pairwise swapped on the stack ([d1, d0, d3, d2]), so keep the
+    # first pair and swap it into [suffix = d0, prefix = d1] (verified against AccountId::new)
+    movup.2 drop movup.2 drop swap
+    # => [hashed_suffix, hashed_prefix, ...]
+
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    # => [opp_prefix, opp_suffix, hits, received, hashed_suffix, hashed_prefix, ...]
+
+    movup.2 drop movup.2 drop swap
+    # => [opp_suffix, opp_prefix, hashed_suffix, hashed_prefix, ...]
+
+    movup.2 movup.3
+    # => [hashed_suffix, hashed_prefix, opp_suffix, opp_prefix, ...]
+
+    exec.account_id::shape_suffix
+    exec.account_id::eq assert.err=ERR_HANDSHAKE_SEED_MISMATCH
+    # => [...]
 end
 
 #! Asserts that the active note's sender is the stored opponent.
-#!
-#! Inputs:  []
-#! Outputs: []
-#!
-#! Panics if:
-#! - the sender prefix or suffix differs from the stored opponent.
-#!
-#! Invocation: exec
+#! Inputs: [] Outputs: []
 proc assert_sender_is_opponent()
     exec.active_note::get_sender
-    # => [sender_suffix, sender_prefix]
-
     push.OPPONENT_SLOT[0..2] exec.active_account::get_item
-    # => [opponent_prefix, opponent_suffix, ships_hit_count, total_shots_received, sender_suffix, sender_prefix]
-
     movup.2 drop movup.2 drop
-    # => [opponent_prefix, opponent_suffix, sender_suffix, sender_prefix]
-
     movup.3 assert_eq.err=ERR_SENDER_PREFIX_MISMATCH
-    # => [opponent_suffix, sender_suffix]
-
     assert_eq.err=ERR_SENDER_SUFFIX_MISMATCH
-    # => []
 end
 
 #! Asserts that row and col are u32 values below GRID_SIZE.
-#!
-#! Inputs:  [row, col]
-#! Outputs: [row, col]
-#!
-#! Panics if:
-#! - row or col is not a u32 below GRID_SIZE.
-#!
-#! Invocation: exec
+#! Inputs: [row, col] Outputs: [row, col]
 proc assert_in_bounds(row: u32, col: u32) -> (u32, u32)
     u32assert2.err=ERR_ROW_OUT_OF_BOUNDS
     dup push.GRID_SIZE u32lt assert.err=ERR_ROW_OUT_OF_BOUNDS
     dup.1 push.GRID_SIZE u32lt assert.err=ERR_COL_OUT_OF_BOUNDS
-    # => [row, col]
+end
+
+#! Asserts deadline >= reference block timestamp + DEADLINE_DELTA.
+#! Inputs: [deadline] Outputs: []
+proc assert_deadline(deadline: u32)
+    u32assert.err=ERR_DEADLINE_TOO_SHORT
+    exec.tx::get_block_timestamp add.DEADLINE_DELTA
+    # => [earliest, deadline]
+    u32gte assert.err=ERR_DEADLINE_TOO_SHORT
 end
 
 #! Loads the packed row at the given index from the board array.
-#!
-#! Inputs:  [row]
-#! Outputs: [packed_row]
-#!
-#! Invocation: exec
+#! Inputs: [row] Outputs: [packed_row]
 proc load_packed_row(row: u32) -> u32
     push.BOARD_SLOT[0..2] exec.array::get
-    # => [packed_row, 0, 0, 0]
-
     movdn.3 drop drop drop
-    # => [packed_row]
 end
 
-#! Counts the cell values of one packed row into the counters at counts_ptr (one counter per
-#! cell value 0..5).
-#!
-#! Inputs:  [counts_ptr, packed_row]
-#! Outputs: []
-#!
-#! Panics if:
-#! - a cell value is greater than MAX_SHIP_ID.
-#! - the row has bits set beyond its 10 cells.
-#!
-#! Invocation: exec
+#! Loads the my_shots entry of a row.
+#! Inputs: [row] Outputs: [fired_bits, hit_bits]
+proc load_my_shots(row: u32) -> (u32, u32)
+    push.MY_SHOTS_SLOT[0..2] exec.array::get
+    movdn.3 movdn.3 drop drop
+end
+
+#! Inputs: [] Outputs: [opp_prefix]
+proc load_opponent_prefix() -> felt
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    movdn.3 drop drop drop
+end
+
+#! Inputs: [] Outputs: [opp_suffix]
+proc load_opponent_suffix() -> felt
+    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
+    drop movdn.2 drop drop
+end
+
+#! Inputs: [kind, ROOT] Outputs: []
+proc store_script_root(kind: felt, root: word)
+    push.SCRIPT_ROOTS_SLOT[0..2]
+    # => [slot_suffix, slot_prefix, kind, ROOT]
+    exec.array::set dropw
+end
+
+#! Inputs: [kind] Outputs: [ROOT]
+proc load_script_root(kind: felt) -> word
+    push.SCRIPT_ROOTS_SLOT[0..2] exec.array::get
+end
+
+#! Inputs: [kind, ROOT] Outputs: []
+proc assert_script_root(kind: felt, root: word)
+    exec.load_script_root
+    assert_eqw.err=ERR_HANDSHAKE_ROOTS_MISMATCH
+end
+
+#! Builds this account's deterministic serial number [my_prefix, my_suffix, turn, kind].
+#! Inputs: [turn, kind] Outputs: [SERIAL]
+proc own_serial(turn: felt, kind: felt) -> NoteSerialNumber
+    exec.active_account::get_id
+    # => [my_suffix, my_prefix, turn, kind]
+    swap
+    # => [my_prefix, my_suffix, turn, kind]
+end
+
+#! Creates a public note targeted at the account with the given prefix.
+#! Inputs: [storage_ptr, num_items, SERIAL, SCRIPT_ROOT, target_prefix] Outputs: []
+proc emit_note()
+    exec.note::compute_and_store_recipient
+    # => [RECIPIENT, target_prefix]
+
+    movup.4 exec.note_tag::create_account_target
+    # => [tag, RECIPIENT]
+
+    push.NOTE_TYPE_PUBLIC swap
+    exec.output_note::create drop
+end
+
+#! Creates a public note for a wallet with storage [wallet_prefix, wallet_suffix], serial kind
+#! `serial_kind` and the stored root `root_kind`, tagged for the wallet.
+#! Inputs: [root_kind, serial_kind, wallet_prefix, wallet_suffix, storage_ptr] Outputs: []
+proc emit_wallet_note(root_kind: felt, serial_kind: felt, wallet_prefix: felt, wallet_suffix: felt, storage_ptr: ptr<felt>)
+    movup.2 dup dup.5 mem_store
+    # => [wallet_prefix, root_kind, serial_kind, wallet_suffix, storage_ptr]
+    movup.3 dup.4 add.1 mem_store
+    # => [wallet_prefix, root_kind, serial_kind, storage_ptr]
+    movdn.3
+    # => [root_kind, serial_kind, storage_ptr, wallet_prefix]
+    swap push.0 exec.own_serial
+    # => [SERIAL, root_kind, storage_ptr, wallet_prefix]
+    movup.4 exec.load_script_root
+    # => [ROOT, SERIAL, storage_ptr, wallet_prefix]
+    swapw push.WALLET_NOTE_NUM_STORAGE_ITEMS movup.9
+    # => [storage_ptr, num_items, SERIAL, ROOT, wallet_prefix]
+    exec.emit_note
+end
+
+#! Counts the cell values of one packed row into the counters at counts_ptr.
+#! Inputs: [counts_ptr, packed_row] Outputs: []
 proc count_row_cells(counts_ptr: ptr<felt>, packed_row: u32)
     push.GRID_SIZE
-    # => [cells_left, counts_ptr, packed_row]
-
     dup neq.0
     while.true
-        # => [cells_left, counts_ptr, packed_row]
         dup.2 push.CELL_MASK u32and
-        # => [cell, cells_left, counts_ptr, packed_row]
-
         dup push.MAX_SHIP_ID u32lte assert.err=ERR_CELL_VALUE_INVALID
-        # => [cell, cells_left, counts_ptr, packed_row]
-
         dup.2 add dup mem_load add.1 swap mem_store
-        # => [cells_left, counts_ptr, packed_row]
-
         movup.2 u32shr.CELL_BITS movdn.2
-        # => [cells_left, counts_ptr, packed_row']
-
         sub.1 dup neq.0
-        # => [cells_left != 0, cells_left, counts_ptr, packed_row']
     end
     drop drop
-    # => [packed_row']
-
     assertz.err=ERR_ROW_HAS_EXTRA_BITS
-    # => []
 end

@@ -8,62 +8,88 @@ use battleship::account as battleship
 # CONSTANTS
 # =================================================================================================
 
-# Memory base at which the note storage is written by `active_note::get_bounded_storage`.
 const STORAGE_PTR = 0
 
-# Note storage layout: [GAME_ID(4), acceptor_prefix, acceptor_suffix, COMMITMENT(4)].
+# Note storage layout (28 items):
+# [GAME_ID(4), sender_prefix, sender_suffix, SEED(4), wallet_prefix, wallet_suffix,
+#  SHOT_ROOT(4), RESULT_ROOT(4), DEFEAT_ROOT(4), FORFEIT_ROOT(4)]
 const GAME_ID_PTR = STORAGE_PTR
-const ACCEPTOR_PREFIX_PTR = STORAGE_PTR + 4
-const ACCEPTOR_SUFFIX_PTR = STORAGE_PTR + 5
-const COMMITMENT_PTR = STORAGE_PTR + 6
-const NUM_STORAGE_ITEMS = 10
+const SENDER_PREFIX_PTR = STORAGE_PTR + 4
+const SENDER_SUFFIX_PTR = STORAGE_PTR + 5
+const SEED_PTR = STORAGE_PTR + 6
+const WALLET_PREFIX_PTR = STORAGE_PTR + 10
+const WALLET_SUFFIX_PTR = STORAGE_PTR + 11
+const SHOT_ROOT_PTR = STORAGE_PTR + 12
+const RESULT_ROOT_PTR = STORAGE_PTR + 16
+const DEFEAT_ROOT_PTR = STORAGE_PTR + 20
+const FORFEIT_ROOT_PTR = STORAGE_PTR + 24
+const NUM_STORAGE_ITEMS = 28
 
 # ERRORS
 # =================================================================================================
 
-const ERR_ACCEPT_NOTE_WRONG_NUM_STORAGE_ITEMS = "accept note must carry exactly 10 storage items"
+const ERR_ACCEPT_NOTE_WRONG_NUM_STORAGE_ITEMS = "accept note must carry exactly 28 storage items"
 
 # NOTE SCRIPT
 # =================================================================================================
 
-#! Delivers the acceptance carried by this note to the consuming account.
+#! Pins the acceptor's script roots and delivers the acceptance to the consuming account.
 #!
 #! Inputs:  [NOTE_ARGS, pad(12)]
 #! Outputs: [pad(16)]
-#!
-#! Panics if:
-#! - the note does not carry exactly NUM_STORAGE_ITEMS storage items.
-#! - battleship::receive_acceptance fails to verify.
 #!
 #! Invocation: dyncall
 @note_script
 pub proc main(args: NoteArgs)
     dropw
-    # => [pad(16)]
-
     push.NUM_STORAGE_ITEMS push.STORAGE_PTR exec.active_note::get_bounded_storage
-    # => [num_storage_items, pad(16)]
-
     eq.NUM_STORAGE_ITEMS assert.err=ERR_ACCEPT_NOTE_WRONG_NUM_STORAGE_ITEMS
     # => [pad(16)]
 
-    # build the receive_acceptance window [GAME_ID, acceptor_suffix, acceptor_prefix, COMMITMENT, pad(6)]
-    padw push.0.0
-    push.COMMITMENT_PTR add.3 mem_load
-    push.COMMITMENT_PTR add.2 mem_load
-    push.COMMITMENT_PTR add.1 mem_load
-    push.COMMITMENT_PTR mem_load
-    mem_load.ACCEPTOR_PREFIX_PTR
-    mem_load.ACCEPTOR_SUFFIX_PTR
+    exec.push_roots_window
+    call.battleship::assert_script_roots
+    dropw dropw dropw dropw
+    # => [pad(16)]
+
+    exec.push_handshake_window
+    call.battleship::receive_acceptance
+    dropw dropw dropw dropw
+    # => [pad(16)]
+end
+
+#! Pushes [SHOT_ROOT, RESULT_ROOT, DEFEAT_ROOT, FORFEIT_ROOT] (16 elements).
+proc push_roots_window()
+    push.FORFEIT_ROOT_PTR add.3 mem_load
+    push.FORFEIT_ROOT_PTR add.2 mem_load
+    push.FORFEIT_ROOT_PTR add.1 mem_load
+    push.FORFEIT_ROOT_PTR mem_load
+    push.DEFEAT_ROOT_PTR add.3 mem_load
+    push.DEFEAT_ROOT_PTR add.2 mem_load
+    push.DEFEAT_ROOT_PTR add.1 mem_load
+    push.DEFEAT_ROOT_PTR mem_load
+    push.RESULT_ROOT_PTR add.3 mem_load
+    push.RESULT_ROOT_PTR add.2 mem_load
+    push.RESULT_ROOT_PTR add.1 mem_load
+    push.RESULT_ROOT_PTR mem_load
+    push.SHOT_ROOT_PTR add.3 mem_load
+    push.SHOT_ROOT_PTR add.2 mem_load
+    push.SHOT_ROOT_PTR add.1 mem_load
+    push.SHOT_ROOT_PTR mem_load
+end
+
+#! Pushes [GAME_ID, sender_suffix, sender_prefix, SEED, wallet_suffix, wallet_prefix, pad(4)].
+proc push_handshake_window()
+    padw
+    mem_load.WALLET_PREFIX_PTR
+    mem_load.WALLET_SUFFIX_PTR
+    push.SEED_PTR add.3 mem_load
+    push.SEED_PTR add.2 mem_load
+    push.SEED_PTR add.1 mem_load
+    push.SEED_PTR mem_load
+    mem_load.SENDER_PREFIX_PTR
+    mem_load.SENDER_SUFFIX_PTR
     push.GAME_ID_PTR add.3 mem_load
     push.GAME_ID_PTR add.2 mem_load
     push.GAME_ID_PTR add.1 mem_load
     push.GAME_ID_PTR mem_load
-    # => [GAME_ID, acceptor_suffix, acceptor_prefix, COMMITMENT, pad(6), pad(16)]
-
-    call.battleship::receive_acceptance
-    # => [pad(16), pad(16)]
-
-    dropw dropw dropw dropw
-    # => [pad(16)]
 end

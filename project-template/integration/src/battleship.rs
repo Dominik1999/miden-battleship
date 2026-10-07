@@ -5,8 +5,8 @@ use anyhow::{Context, Result};
 use miden_client::{
     account::{
         component::{AccountComponentMetadata, BasicWallet, NoAuth},
-        Account, AccountBuilder, AccountComponent, AccountComponentCode, AccountId, AccountType,
-        StorageMap, StorageMapKey, StorageSlot, StorageSlotName,
+        Account, AccountBuilder, AccountComponent, AccountComponentCode, AccountId, AccountStorage,
+        AccountType, StorageMap, StorageMapKey, StorageSlot, StorageSlotName,
     },
     assembly::CodeBuilder,
     note::{
@@ -25,8 +25,15 @@ use miden_protocol::Hasher;
 pub const PHASE_CREATED: u64 = 0;
 pub const PHASE_CHALLENGED: u64 = 1;
 pub const PHASE_ACTIVE: u64 = 2;
-pub const PHASE_REVEAL: u64 = 3;
-pub const PHASE_COMPLETE: u64 = 4;
+pub const PHASE_COMPLETE: u64 = 3;
+
+pub const ROLE_CHALLENGER: u64 = 1;
+pub const ROLE_ACCEPTOR: u64 = 2;
+
+pub const OUTCOME_OPEN: u64 = 0;
+pub const OUTCOME_WON: u64 = 1;
+pub const OUTCOME_LOST: u64 = 2;
+pub const OUTCOME_WON_BY_FORFEIT: u64 = 3;
 
 pub const CELL_WATER: u64 = 0;
 pub const CELL_HIT: u64 = 6;
@@ -42,14 +49,25 @@ pub const SHIP_SIZES: [u64; 5] = [5, 4, 3, 3, 2];
 pub const ACCEPTOR_FIRST_TURN: u64 = 1;
 pub const CHALLENGER_FIRST_TURN: u64 = 2;
 
-/// Result note storage: `[shooter_prefix, shooter_suffix, turn, encoded_result]`.
-pub const RESULT_NUM_STORAGE_ITEMS: usize = 4;
-/// Shot note storage: `[row, col, turn, RESULT_SERIAL_NUM(4), RESULT_SCRIPT_ROOT(4)]`.
-pub const SHOT_NUM_STORAGE_ITEMS: usize = 11;
-/// Handshake note storage: `[GAME_ID(4), sender_prefix, sender_suffix, COMMITMENT(4)]`.
-pub const HANDSHAKE_NUM_STORAGE_ITEMS: usize = 10;
-/// Setup payload: `[GAME_ID(4), opponent_prefix, opponent_suffix, COMMITMENT(4), rows(10)]`.
-pub const SETUP_PAYLOAD_NUM_ITEMS: usize = 20;
+/// Seconds a note must stay consumable before its sender may reclaim it (12 hours).
+pub const DEADLINE_DELTA: u64 = 43_200;
+
+/// Note kinds: `script_roots` map keys and serial-number kinds.
+pub const ROOT_SHOT: u64 = 0;
+pub const ROOT_RESULT: u64 = 1;
+pub const ROOT_DEFEAT: u64 = 2;
+pub const ROOT_FORFEIT: u64 = 3;
+pub const SERIAL_KIND_SHOT: u64 = 1;
+pub const SERIAL_KIND_RESULT: u64 = 2;
+pub const SERIAL_KIND_DEFEAT: u64 = 3;
+pub const SERIAL_KIND_FORFEIT: u64 = 4;
+
+/// Storage sizes.
+pub const SHOT_NUM_STORAGE_ITEMS: usize = 4;
+pub const RESULT_NUM_STORAGE_ITEMS: usize = 5;
+pub const WALLET_NOTE_NUM_STORAGE_ITEMS: usize = 2;
+pub const HANDSHAKE_NUM_STORAGE_ITEMS: usize = 28;
+pub const SETUP_PAYLOAD_NUM_ITEMS: usize = 36;
 
 /// Encoded shot result: `is_hit * 2 + game_over`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -78,22 +96,43 @@ impl ShotResult {
 /// Module path under which the component is compiled; note and tx scripts `call` into it.
 pub const COMPONENT_PATH: &str = "battleship::account";
 
-pub const ACCOUNT_MASM: &str = include_str!("../../contracts/masm/battleship_account.masm");
+/// The component source with `{{ISCn}}` placeholders for the initial storage commitment.
+pub const ACCOUNT_MASM_TEMPLATE: &str =
+    include_str!("../../contracts/masm/battleship_account.masm");
 pub const CHALLENGE_NOTE_MASM: &str = include_str!("../../contracts/masm/challenge_note.masm");
 pub const ACCEPT_NOTE_MASM: &str = include_str!("../../contracts/masm/accept_note.masm");
 pub const SHOT_NOTE_MASM: &str = include_str!("../../contracts/masm/shot_note.masm");
 pub const RESULT_NOTE_MASM: &str = include_str!("../../contracts/masm/result_note.masm");
-pub const REVEAL_NOTE_MASM: &str = include_str!("../../contracts/masm/reveal_note.masm");
+pub const DEFEAT_NOTE_MASM: &str = include_str!("../../contracts/masm/defeat_note.masm");
+pub const FORFEIT_NOTE_MASM: &str = include_str!("../../contracts/masm/forfeit_note.masm");
 pub const SETUP_TX_MASM: &str = include_str!("../../contracts/masm/scripts/setup_tx.masm");
-pub const ENTER_REVEAL_TX_MASM: &str =
-    include_str!("../../contracts/masm/scripts/enter_reveal_tx.masm");
-pub const MARK_MY_REVEAL_TX_MASM: &str =
-    include_str!("../../contracts/masm/scripts/mark_my_reveal_tx.masm");
+pub const FIRE_TX_MASM: &str = include_str!("../../contracts/masm/scripts/fire_tx.masm");
+
+/// Commitment of a fresh game account's storage (all value slots zero, maps empty). Part of the
+/// account-id derivation the handshake uses to anchor the opponent's code.
+pub fn init_storage_commitment() -> Word {
+    AccountStorage::new(all_storage_slots())
+        .expect("initial storage is valid")
+        .to_commitment()
+}
+
+/// The component source with the initial storage commitment filled in.
+pub fn account_masm() -> String {
+    let isc = init_storage_commitment();
+    let mut source = ACCOUNT_MASM_TEMPLATE.to_string();
+    for (i, felt) in isc.iter().enumerate() {
+        source = source.replace(
+            &format!("{{{{ISC{i}}}}}"),
+            &felt.as_canonical_u64().to_string(),
+        );
+    }
+    source
+}
 
 /// Compiles the battleship account component code.
 pub fn compile_component_code(builder: CodeBuilder) -> Result<AccountComponentCode> {
     builder
-        .compile_component_code(COMPONENT_PATH, ACCOUNT_MASM)
+        .compile_component_code(COMPONENT_PATH, account_masm())
         .map_err(|e| anyhow::anyhow!("failed to compile battleship component: {e}"))
 }
 
@@ -134,19 +173,38 @@ pub fn compile_tx_script(
         .map_err(|e| anyhow::anyhow!("failed to compile tx script: {e}"))
 }
 
+/// Script roots of the notes a game account creates, in `script_roots` map order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScriptRoots {
+    pub shot: Word,
+    pub result: Word,
+    pub defeat: Word,
+    pub forfeit: Word,
+}
+
+impl ScriptRoots {
+    /// The 16 felts `[SHOT, RESULT, DEFEAT, FORFEIT]` as carried in payloads and notes.
+    pub fn felts(&self) -> Vec<Felt> {
+        [self.shot, self.result, self.defeat, self.forfeit]
+            .iter()
+            .flat_map(|w| w.iter().copied())
+            .collect()
+    }
+}
+
 /// All compiled battleship artifacts.
 #[derive(Clone)]
 pub struct BattleshipScripts {
     pub component: AccountComponent,
     pub component_code: AccountComponentCode,
     pub setup_tx: TransactionScript,
-    pub enter_reveal_tx: TransactionScript,
-    pub mark_my_reveal_tx: TransactionScript,
+    pub fire_tx: TransactionScript,
     pub challenge_note: NoteScript,
     pub accept_note: NoteScript,
     pub shot_note: NoteScript,
     pub result_note: NoteScript,
-    pub reveal_note: NoteScript,
+    pub defeat_note: NoteScript,
+    pub forfeit_note: NoteScript,
 }
 
 impl BattleshipScripts {
@@ -165,28 +223,32 @@ impl BattleshipScripts {
         let accept_note = note(ACCEPT_NOTE_MASM)?;
         let shot_note = note(SHOT_NOTE_MASM)?;
         let result_note = note(RESULT_NOTE_MASM)?;
-        let reveal_note = note(REVEAL_NOTE_MASM)?;
+        let defeat_note = note(DEFEAT_NOTE_MASM)?;
+        let forfeit_note = note(FORFEIT_NOTE_MASM)?;
         let mut tx = |src| compile_tx_script(new_builder(), &component_code, src);
         let setup_tx = tx(SETUP_TX_MASM)?;
-        let enter_reveal_tx = tx(ENTER_REVEAL_TX_MASM)?;
-        let mark_my_reveal_tx = tx(MARK_MY_REVEAL_TX_MASM)?;
+        let fire_tx = tx(FIRE_TX_MASM)?;
         Ok(Self {
             component,
             component_code,
             setup_tx,
-            enter_reveal_tx,
-            mark_my_reveal_tx,
+            fire_tx,
             challenge_note,
             accept_note,
             shot_note,
             result_note,
-            reveal_note,
+            defeat_note,
+            forfeit_note,
         })
     }
 
-    /// The result note script root, as carried in shot-note storage.
-    pub fn result_script_root(&self) -> Word {
-        Word::from(self.result_note.root())
+    pub fn roots(&self) -> ScriptRoots {
+        ScriptRoots {
+            shot: Word::from(self.shot_note.root()),
+            result: Word::from(self.result_note.root()),
+            defeat: Word::from(self.defeat_note.root()),
+            forfeit: Word::from(self.forfeit_note.root()),
+        }
     }
 }
 
@@ -195,48 +257,68 @@ impl BattleshipScripts {
 // ============================================================================
 
 fn slot(name: &str) -> StorageSlotName {
-    StorageSlotName::new(name).expect("slot name is valid")
-}
-pub fn board_slot() -> StorageSlotName {
-    slot("miden_battleship_account::battleship_account::my_board")
+    StorageSlotName::new(format!(
+        "miden_battleship_account::battleship_account::{name}"
+    ))
+    .expect("slot name is valid")
 }
 pub fn game_config_slot() -> StorageSlotName {
-    slot("miden_battleship_account::battleship_account::game_config")
+    slot("game_config")
 }
 pub fn opponent_slot() -> StorageSlotName {
-    slot("miden_battleship_account::battleship_account::opponent")
-}
-pub fn board_commitment_slot() -> StorageSlotName {
-    slot("miden_battleship_account::battleship_account::board_commitment")
-}
-pub fn opponent_commitment_slot() -> StorageSlotName {
-    slot("miden_battleship_account::battleship_account::opponent_commitment")
+    slot("opponent")
 }
 pub fn game_id_slot() -> StorageSlotName {
-    slot("miden_battleship_account::battleship_account::game_id")
+    slot("game_id")
 }
-pub fn reveal_status_slot() -> StorageSlotName {
-    slot("miden_battleship_account::battleship_account::reveal_status")
+pub fn owner_wallet_slot() -> StorageSlotName {
+    slot("owner_wallet")
+}
+pub fn opponent_wallet_slot() -> StorageSlotName {
+    slot("opponent_wallet")
+}
+pub fn turn_state_slot() -> StorageSlotName {
+    slot("turn_state")
+}
+pub fn last_shot_slot() -> StorageSlotName {
+    slot("last_shot")
+}
+pub fn outcome_slot() -> StorageSlotName {
+    slot("outcome")
+}
+pub fn board_slot() -> StorageSlotName {
+    slot("my_board")
+}
+pub fn my_shots_slot() -> StorageSlotName {
+    slot("my_shots")
+}
+pub fn script_roots_slot() -> StorageSlotName {
+    slot("script_roots")
 }
 
-/// Initial storage of a fresh game account: all value slots zero, the board map empty.
+/// Initial storage of a fresh game account: all value slots zero, the maps empty.
 pub fn all_storage_slots() -> Vec<StorageSlot> {
     vec![
         StorageSlot::with_value(game_config_slot(), Word::default()),
         StorageSlot::with_value(opponent_slot(), Word::default()),
-        StorageSlot::with_value(board_commitment_slot(), Word::default()),
-        StorageSlot::with_value(opponent_commitment_slot(), Word::default()),
         StorageSlot::with_value(game_id_slot(), Word::default()),
-        StorageSlot::with_value(reveal_status_slot(), Word::default()),
+        StorageSlot::with_value(owner_wallet_slot(), Word::default()),
+        StorageSlot::with_value(opponent_wallet_slot(), Word::default()),
+        StorageSlot::with_value(turn_state_slot(), Word::default()),
+        StorageSlot::with_value(last_shot_slot(), Word::default()),
+        StorageSlot::with_value(outcome_slot(), Word::default()),
         StorageSlot::with_map(board_slot(), StorageMap::new()),
+        StorageSlot::with_map(my_shots_slot(), StorageMap::new()),
+        StorageSlot::with_map(script_roots_slot(), StorageMap::new()),
     ]
 }
 
-/// Builds a game account: battleship component + `BasicWallet` (to receive the fee asset) +
-/// `NoAuth`. Use `build()` for a new account and `build_existing()` in MockChain tests.
+/// Builds a PRIVATE game account: battleship component + `BasicWallet` (to receive the fee
+/// asset) + `NoAuth`. Use `build()`; the account's seed (`account.seed()`) is carried in the
+/// handshake notes so the opponent can verify the code anchoring.
 pub fn game_account_builder(seed: [u8; 32], component: AccountComponent) -> AccountBuilder {
     AccountBuilder::new(seed)
-        .account_type(AccountType::Public)
+        .account_type(AccountType::Private)
         .with_component(component)
         .with_component(BasicWallet)
         .with_component(NoAuth)
@@ -266,6 +348,16 @@ pub fn id_prefix(id: AccountId) -> Felt {
 
 pub fn id_suffix(id: AccountId) -> Felt {
     id.suffix()
+}
+
+/// Serial number a game account gives the notes it creates: `[prefix, suffix, turn, kind]`.
+pub fn own_serial(account: AccountId, turn: u64, kind: u64) -> Word {
+    Word::from([
+        id_prefix(account),
+        id_suffix(account),
+        felt(turn),
+        felt(kind),
+    ])
 }
 
 // ============================================================================
@@ -298,22 +390,26 @@ pub fn cell_from_packed(packed: u64, col: u64) -> u64 {
 }
 
 // ============================================================================
-// Setup transaction payload
+// Transaction payloads and arguments
 // ============================================================================
 
-/// Builds the 20-felt setup payload consumed by `scripts/setup_tx.masm`.
+/// Builds the 36-felt setup payload consumed by `scripts/setup_tx.masm`.
 pub fn build_setup_payload(
     game_id: Word,
     opponent: AccountId,
-    commitment: Word,
+    owner_wallet: AccountId,
     rows: &[u64; 10],
+    roots: &ScriptRoots,
 ) -> Vec<Felt> {
     let mut payload = Vec::with_capacity(SETUP_PAYLOAD_NUM_ITEMS);
     payload.extend(game_id.iter().copied());
     payload.push(id_prefix(opponent));
     payload.push(id_suffix(opponent));
-    payload.extend(commitment.iter().copied());
+    payload.push(id_prefix(owner_wallet));
+    payload.push(id_suffix(owner_wallet));
     payload.extend(rows.iter().map(|r| felt(*r)));
+    payload.extend(roots.felts());
+    payload.extend([felt(0), felt(0)]);
     debug_assert_eq!(payload.len(), SETUP_PAYLOAD_NUM_ITEMS);
     payload
 }
@@ -325,45 +421,109 @@ pub fn setup_payload_commitment(payload: &[Felt]) -> Word {
     Hasher::hash_elements(payload)
 }
 
+/// Transaction script argument of `scripts/fire_tx.masm`.
+pub fn fire_args(row: u64, col: u64, deadline: u64) -> Word {
+    word([row, col, deadline, 0])
+}
+
+/// Note argument the defender passes when consuming a shot note: the deadline it gives the
+/// shooter to answer the result note.
+pub fn shot_note_args(result_deadline: u64) -> Word {
+    word([result_deadline; 4])
+}
+
 // ============================================================================
 // Note storage layouts
 // ============================================================================
 
-/// Challenge / accept note storage: `[GAME_ID(4), sender_prefix, sender_suffix, COMMITMENT(4)]`.
-pub fn handshake_storage(game_id: Word, sender: AccountId, commitment: Word) -> Vec<Felt> {
+/// Challenge / accept note storage:
+/// `[GAME_ID(4), sender_prefix, sender_suffix, SEED(4), wallet_prefix, wallet_suffix, ROOTS(16)]`.
+pub fn handshake_storage(
+    game_id: Word,
+    sender: AccountId,
+    seed: Word,
+    wallet: AccountId,
+    roots: &ScriptRoots,
+) -> Vec<Felt> {
     let mut items = Vec::with_capacity(HANDSHAKE_NUM_STORAGE_ITEMS);
     items.extend(game_id.iter().copied());
     items.push(id_prefix(sender));
     items.push(id_suffix(sender));
-    items.extend(commitment.iter().copied());
+    items.extend(seed.iter().copied());
+    items.push(id_prefix(wallet));
+    items.push(id_suffix(wallet));
+    items.extend(roots.felts());
+    debug_assert_eq!(items.len(), HANDSHAKE_NUM_STORAGE_ITEMS);
     items
 }
 
-/// Shot note storage: `[row, col, turn, RESULT_SERIAL_NUM(4), RESULT_SCRIPT_ROOT(4)]`.
-pub fn shot_storage(
-    row: u64,
-    col: u64,
+/// Shot note storage: `[row, col, turn, deadline]`.
+pub fn shot_storage(row: u64, col: u64, turn: u64, deadline: u64) -> Vec<Felt> {
+    vec![felt(row), felt(col), felt(turn), felt(deadline)]
+}
+
+/// Result note storage: `[shooter_prefix, shooter_suffix, turn, encoded_result, deadline]`.
+pub fn result_storage(
+    shooter: AccountId,
     turn: u64,
-    result_serial_num: Word,
-    result_script_root: Word,
+    result: ShotResult,
+    deadline: u64,
 ) -> Vec<Felt> {
-    let mut items = Vec::with_capacity(SHOT_NUM_STORAGE_ITEMS);
-    items.push(felt(row));
-    items.push(felt(col));
-    items.push(felt(turn));
-    items.extend(result_serial_num.iter().copied());
-    items.extend(result_script_root.iter().copied());
-    items
-}
-
-/// Result note storage: `[shooter_prefix, shooter_suffix, turn, encoded_result]`.
-pub fn result_storage(shooter: AccountId, turn: u64, result: ShotResult) -> Vec<Felt> {
     vec![
         id_prefix(shooter),
         id_suffix(shooter),
         felt(turn),
         felt(result.encode()),
+        felt(deadline),
     ]
+}
+
+/// Defeat / forfeit note storage: `[wallet_prefix, wallet_suffix]`.
+pub fn wallet_note_storage(wallet: AccountId) -> Vec<Felt> {
+    vec![id_prefix(wallet), id_suffix(wallet)]
+}
+
+/// Parsed handshake-note storage.
+#[derive(Debug, Clone)]
+pub struct HandshakeStorage {
+    pub game_id: Word,
+    pub sender: AccountId,
+    pub seed: Word,
+    pub wallet: AccountId,
+    pub roots: ScriptRoots,
+}
+
+fn word_at(items: &[Felt], at: usize) -> Word {
+    Word::from([items[at], items[at + 1], items[at + 2], items[at + 3]])
+}
+
+fn id_at(items: &[Felt], at: usize) -> Result<AccountId> {
+    AccountId::try_from_elements(items[at + 1], items[at])
+        .map_err(|e| anyhow::anyhow!("invalid account id: {e}"))
+}
+
+impl HandshakeStorage {
+    pub fn from_note(note: &Note) -> Result<Self> {
+        let items = note.recipient().storage().items();
+        anyhow::ensure!(
+            items.len() == HANDSHAKE_NUM_STORAGE_ITEMS,
+            "handshake note has {} storage items, expected {}",
+            items.len(),
+            HANDSHAKE_NUM_STORAGE_ITEMS
+        );
+        Ok(Self {
+            game_id: word_at(items, 0),
+            sender: id_at(items, 4)?,
+            seed: word_at(items, 6),
+            wallet: id_at(items, 10)?,
+            roots: ScriptRoots {
+                shot: word_at(items, 12),
+                result: word_at(items, 16),
+                defeat: word_at(items, 20),
+                forfeit: word_at(items, 24),
+            },
+        })
+    }
 }
 
 /// Parsed shot-note storage.
@@ -372,8 +532,7 @@ pub struct ShotNoteStorage {
     pub row: u64,
     pub col: u64,
     pub turn: u64,
-    pub result_serial_num: Word,
-    pub result_script_root: Word,
+    pub deadline: u64,
 }
 
 impl ShotNoteStorage {
@@ -389,8 +548,7 @@ impl ShotNoteStorage {
             row: items[0].as_canonical_u64(),
             col: items[1].as_canonical_u64(),
             turn: items[2].as_canonical_u64(),
-            result_serial_num: Word::from([items[3], items[4], items[5], items[6]]),
-            result_script_root: Word::from([items[7], items[8], items[9], items[10]]),
+            deadline: items[3].as_canonical_u64(),
         })
     }
 }
@@ -398,10 +556,10 @@ impl ShotNoteStorage {
 /// Parsed result-note storage.
 #[derive(Debug, Clone, Copy)]
 pub struct ResultNoteStorage {
-    pub shooter_prefix: Felt,
-    pub shooter_suffix: Felt,
+    pub shooter: AccountId,
     pub turn: u64,
     pub result: ShotResult,
+    pub deadline: u64,
 }
 
 impl ResultNoteStorage {
@@ -413,10 +571,10 @@ impl ResultNoteStorage {
             RESULT_NUM_STORAGE_ITEMS
         );
         Ok(Self {
-            shooter_prefix: items[0],
-            shooter_suffix: items[1],
+            shooter: id_at(items, 0)?,
             turn: items[2].as_canonical_u64(),
             result: ShotResult::decode(items[3].as_canonical_u64()),
+            deadline: items[4].as_canonical_u64(),
         })
     }
 
@@ -443,8 +601,7 @@ pub fn make_note(
     Ok(Note::new(NoteAssets::default(), metadata, recipient))
 }
 
-/// Builds a game note (challenge, accept, shot, reveal) from `sender` targeting `target`'s
-/// account via the note tag.
+/// Builds a game note from `sender` targeting `target`'s account via the note tag.
 pub fn make_game_note(
     script: NoteScript,
     sender: AccountId,
@@ -461,21 +618,70 @@ pub fn make_game_note(
     )
 }
 
-/// The result note `process_shot` creates on `defender` for the shot by `shooter`.
+/// The shot note `fire_shot` creates on `shooter` for `defender`.
+pub fn expected_shot_note(
+    scripts: &BattleshipScripts,
+    shooter: AccountId,
+    defender: AccountId,
+    row: u64,
+    col: u64,
+    turn: u64,
+    deadline: u64,
+) -> Result<Note> {
+    make_game_note(
+        scripts.shot_note.clone(),
+        shooter,
+        defender,
+        shot_storage(row, col, turn, deadline),
+        own_serial(shooter, turn, SERIAL_KIND_SHOT),
+    )
+}
+
+/// The result note `process_shot` creates on `defender` for `shooter`.
 pub fn expected_result_note(
-    result_script: NoteScript,
+    scripts: &BattleshipScripts,
     defender: AccountId,
     shooter: AccountId,
     turn: u64,
     result: ShotResult,
-    serial_num: Word,
+    deadline: u64,
 ) -> Result<Note> {
     make_game_note(
-        result_script,
+        scripts.result_note.clone(),
         defender,
         shooter,
-        result_storage(shooter, turn, result),
-        serial_num,
+        result_storage(shooter, turn, result, deadline),
+        own_serial(defender, turn, SERIAL_KIND_RESULT),
+    )
+}
+
+/// The defeat note `process_shot` creates on `loser` for `winner_wallet` on the 17th hit.
+pub fn expected_defeat_note(
+    scripts: &BattleshipScripts,
+    loser: AccountId,
+    winner_wallet: AccountId,
+) -> Result<Note> {
+    make_game_note(
+        scripts.defeat_note.clone(),
+        loser,
+        winner_wallet,
+        wallet_note_storage(winner_wallet),
+        own_serial(loser, 0, SERIAL_KIND_DEFEAT),
+    )
+}
+
+/// The forfeit note `claim_forfeit` creates on `claimant` for its `owner_wallet`.
+pub fn expected_forfeit_note(
+    scripts: &BattleshipScripts,
+    claimant: AccountId,
+    owner_wallet: AccountId,
+) -> Result<Note> {
+    make_game_note(
+        scripts.forfeit_note.clone(),
+        claimant,
+        owner_wallet,
+        wallet_note_storage(owner_wallet),
+        own_serial(claimant, 0, SERIAL_KIND_FORFEIT),
     )
 }
 
@@ -483,14 +689,36 @@ pub fn expected_result_note(
 // Game state reading
 // ============================================================================
 
+fn map_key(index: u64) -> StorageMapKey {
+    StorageMapKey::new(word([0, 0, 0, index]))
+}
+
 /// Reads a board cell from the account's board map.
 pub fn read_board_cell(account: &Account, row: u64, col: u64) -> u64 {
-    let key = StorageMapKey::new(word([0, 0, 0, row]));
     let value = account
         .storage()
-        .get_map_item(&board_slot(), key)
+        .get_map_item(&board_slot(), map_key(row))
         .expect("board slot exists");
     cell_from_packed(value[0].as_canonical_u64(), col)
+}
+
+/// Reads whether this account fired at (row, col) and whether that shot hit.
+pub fn read_my_shot(account: &Account, row: u64, col: u64) -> (bool, bool) {
+    let value = account
+        .storage()
+        .get_map_item(&my_shots_slot(), map_key(row))
+        .expect("my_shots slot exists");
+    let fired = (value[0].as_canonical_u64() >> col) & 1 == 1;
+    let hit = (value[1].as_canonical_u64() >> col) & 1 == 1;
+    (fired, hit)
+}
+
+/// Reads a stored script root.
+pub fn read_script_root(account: &Account, kind: u64) -> Word {
+    account
+        .storage()
+        .get_map_item(&script_roots_slot(), map_key(kind))
+        .expect("script_roots slot exists")
 }
 
 /// Structured view of a game account's storage state.
@@ -503,22 +731,30 @@ pub struct GameState {
     pub ships_hit_count: u64,
     pub total_shots_received: u64,
     pub game_id: Word,
-    pub board_commitment: Word,
-    pub opponent_commitment: Word,
-    pub my_revealed: u64,
-    pub opponent_verified: u64,
+    pub owner_wallet: Option<AccountId>,
+    pub opponent_wallet: Option<AccountId>,
+    pub shots_fired: u64,
+    pub results_processed: u64,
+    pub role: u64,
+    pub last_shot: (u64, u64, u64),
+    pub outcome: u64,
+}
+
+fn id_from_slot(value: Word) -> Option<AccountId> {
+    if value[0] == Felt::ZERO {
+        return None;
+    }
+    AccountId::try_from_elements(value[1], value[0]).ok()
 }
 
 impl GameState {
     pub fn from_account(account: &Account) -> Self {
         let storage = account.storage();
-        let config = storage
-            .get_item(&game_config_slot())
-            .expect("game_config slot");
-        let opp = storage.get_item(&opponent_slot()).expect("opponent slot");
-        let reveal = storage
-            .get_item(&reveal_status_slot())
-            .expect("reveal_status slot");
+        let item = |s: StorageSlotName| storage.get_item(&s).expect("slot exists");
+        let config = item(game_config_slot());
+        let opp = item(opponent_slot());
+        let turn_state = item(turn_state_slot());
+        let last_shot = item(last_shot_slot());
         Self {
             phase: config[2].as_canonical_u64(),
             expected_turn: config[3].as_canonical_u64(),
@@ -526,15 +762,18 @@ impl GameState {
             opponent_suffix: opp[1],
             ships_hit_count: opp[2].as_canonical_u64(),
             total_shots_received: opp[3].as_canonical_u64(),
-            game_id: storage.get_item(&game_id_slot()).expect("game_id slot"),
-            board_commitment: storage
-                .get_item(&board_commitment_slot())
-                .expect("board_commitment slot"),
-            opponent_commitment: storage
-                .get_item(&opponent_commitment_slot())
-                .expect("opponent_commitment slot"),
-            my_revealed: reveal[0].as_canonical_u64(),
-            opponent_verified: reveal[1].as_canonical_u64(),
+            game_id: item(game_id_slot()),
+            owner_wallet: id_from_slot(item(owner_wallet_slot())),
+            opponent_wallet: id_from_slot(item(opponent_wallet_slot())),
+            shots_fired: turn_state[0].as_canonical_u64(),
+            results_processed: turn_state[1].as_canonical_u64(),
+            role: turn_state[2].as_canonical_u64(),
+            last_shot: (
+                last_shot[0].as_canonical_u64(),
+                last_shot[1].as_canonical_u64(),
+                last_shot[2].as_canonical_u64(),
+            ),
+            outcome: item(outcome_slot())[0].as_canonical_u64(),
         }
     }
 
@@ -543,7 +782,6 @@ impl GameState {
             PHASE_CREATED => "CREATED",
             PHASE_CHALLENGED => "CHALLENGED",
             PHASE_ACTIVE => "ACTIVE",
-            PHASE_REVEAL => "REVEAL",
             PHASE_COMPLETE => "COMPLETE",
             _ => "UNKNOWN",
         }
@@ -561,7 +799,18 @@ mod tests {
     #[test]
     fn all_masm_compiles() -> Result<()> {
         let scripts = BattleshipScripts::compile()?;
-        assert_ne!(scripts.result_script_root(), Word::default());
+        let roots = scripts.roots();
+        assert_ne!(roots.shot, roots.result);
+        assert_ne!(roots.defeat, roots.forfeit);
+        assert_ne!(init_storage_commitment(), Word::default());
+        Ok(())
+    }
+
+    #[test]
+    fn init_storage_commitment_matches_a_built_account() -> Result<()> {
+        let scripts = BattleshipScripts::compile()?;
+        let account = game_account_builder([7; 32], scripts.component.clone()).build()?;
+        assert_eq!(account.storage().to_commitment(), init_storage_commitment());
         Ok(())
     }
 

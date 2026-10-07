@@ -1,0 +1,33 @@
+use {NoteArgs} from miden::protocol::types
+use miden::protocol::active_note
+use miden::standards::note::note_target
+
+# Defeat note: created by the losing game account on the 17th hit, addressed to the winner's
+# wallet. It carries no assets; consumed next to a stake note it proves that the sending game
+# account lost. Only the named wallet can consume it, so the loser cannot burn it.
+
+const STORAGE_PTR = 0
+const WALLET_PREFIX_PTR = STORAGE_PTR
+const WALLET_SUFFIX_PTR = STORAGE_PTR + 1
+const NUM_STORAGE_ITEMS = 2
+# Distinguishes the defeat (2) and forfeit (3) scripts, which are otherwise identical: assertion
+# error codes are not part of the MAST root, so the scripts need a structural difference.
+const NOTE_KIND = 2
+
+const ERR_DEFEAT_NOTE_WRONG_NUM_STORAGE_ITEMS = "defeat note must carry exactly 2 storage items"
+
+#! Inputs:  [NOTE_ARGS, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Invocation: dyncall
+@note_script
+pub proc main(args: NoteArgs)
+    dropw push.NOTE_KIND drop
+    push.NUM_STORAGE_ITEMS push.STORAGE_PTR exec.active_note::get_bounded_storage
+    eq.NUM_STORAGE_ITEMS assert.err=ERR_DEFEAT_NOTE_WRONG_NUM_STORAGE_ITEMS
+    mem_load.WALLET_PREFIX_PTR
+    mem_load.WALLET_SUFFIX_PTR
+    # => [wallet_suffix, wallet_prefix, pad(16)]
+    exec.note_target::assert_active_account_is_target_account
+    # => [pad(16)]
+end
