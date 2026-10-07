@@ -124,7 +124,7 @@ Testnet 0.17 charges every transaction a fee in USDCx (the chain's fee asset, 6 
 ## Pitfalls
 
 - **wasm-bindgen moves handles passed by value.** A `Felt`/`Word`/`Note`/component handle passed into a `FeltArray`, `Word.newFromFelts`, a builder or the client is consumed. Keep values as `bigint[]` and create fresh handles at the point of use (`felts()` in `src/lib/notes.ts`); read `note.id()` before handing the note over; `ContractCompiler` returns a fresh component/script per call.
-- **No Poseidon2 hash in the web SDK.** The setup script therefore takes an arbitrary advice-map key as its argument (random word in the browser, the payload's sequential hash in Rust); the commitment is an opaque word.
+- **Setup payload key.** The setup script takes an arbitrary advice-map key as its argument (random word in the browser, the payload's sequential hash in Rust). The web SDK exposes `Poseidon2.hashElements`, so a preimage check could be restored; it was dropped because the owner supplies both key and payload.
 - **One client per player.** A client tracking both game accounts never sees a component-created note (the result note) from one account as an input note of the other. The validation binary and the CLI use one store + keystore per player; two browser profiles for the frontend.
 - **`MidenProvider` never initializes behind a disconnected signer provider.** The frontend uses no signer provider at all (`src/providers.tsx`).
 - **Cycle counts** (MockChain, `cycle_benchmark_test`): setup ~31k, shot ~18k, publish ~11k, consume handshake ~14k; all 2^14–2^15 traces. Remote proving takes tens of seconds; the clients use a 120 s (browser) / 300 s (Rust) prover timeout.

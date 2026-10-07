@@ -20,7 +20,7 @@ The contracts are Miden Assembly (`project-template/contracts/masm/`): one accou
 - The commitment is an opaque word (4 felts) chosen by the player's client before setup: random in the CLI and the frontend, constants in the tests.
 - It is stored in the player's own account at setup and in the opponent's account during the handshake.
 - The reveal note carries that word; `verify_opponent_reveal` checks it against the stored opponent commitment.
-- Hashing the board into the commitment (`H(game_id || player || salt || board)`) is not implemented in this version: the web SDK exposes no Poseidon2 hash, and the result note is already ZK-proven, so the reveal is a transparency step, not a correctness requirement (see *Anti-Cheat Model*).
+- Hashing the board into the commitment (`H(game_id || player || salt || board)`) is not implemented in this version: the result note is already ZK-proven, so the reveal is a transparency step, not a correctness requirement (see *Anti-Cheat Model*).
 
 ## Transaction Model
 

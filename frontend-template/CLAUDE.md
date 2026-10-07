@@ -101,7 +101,7 @@ The frontend compiles the contracts from source at runtime; there is nothing to 
 
 **wasm-bindgen moves handles passed by value.** A `Felt`, `Word`, `Note`, `AccountComponent` or script handle passed into a `FeltArray`, `Word.newFromFelts`, a builder or the client is consumed and cannot be reused. Keep field elements as `bigint[]` (`FeltValues`) and create fresh handles at the point of use with `felts()`; read `note.id()` before passing the note on; `ContractCompiler` hands out a fresh component/script per call and only caches a private library component.
 
-**No Poseidon2 hash in the web SDK.** The setup payload's advice-map key is a random word (`randomValues()`); commitments and game ids are random words too.
+**Setup payload key.** The setup payload's advice-map key is a random word (`randomValues()`); commitments and game ids are random words too. The web SDK does expose `Poseidon2.hashElements` if a preimage check is ever wanted.
 
 **One client per player.** A client that tracks both game accounts never sees the result note one account creates as an input note of the other. Test with two browser profiles.
 
