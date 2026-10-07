@@ -152,7 +152,6 @@ const ERR_HANDSHAKE_ROOTS_MISMATCH = "handshake script roots do not match"
 
 const ERR_FIRE_WRONG_PHASE = "fire_shot requires the ACTIVE phase"
 const ERR_FIRE_RESULT_PENDING = "fire_shot requires the previous result to be processed"
-const ERR_FIRE_NOT_YOUR_TURN = "fire_shot: it is not this account's turn"
 const ERR_FIRE_CELL_REPEATED = "fire_shot: cell was already fired at"
 const ERR_DEADLINE_TOO_SHORT = "deadline must be at least 12 hours after the reference block"
 
@@ -406,10 +405,13 @@ end
 #! - deadline is the block timestamp after which the opponent can no longer resolve the shot and
 #!   this account may reclaim it; it must be at least DEADLINE_DELTA after the reference block.
 #!
+#! The challenger fires turns 1, 3, 5, ..., the acceptor 2, 4, 6, ...; each side's turn numbers
+#! only depend on its own count of shots fired, and the defender's expected turn only on the shots
+#! it received, so a shot is always consumable by the opponent once the previous shot was resolved.
+#!
 #! Panics if:
 #! - the game is not ACTIVE.
 #! - the result of the previous shot has not been processed.
-#! - it is not this account's turn (challenger: shots_fired == shots_received; acceptor: + 1).
 #! - the cell is out of bounds or was already fired at.
 #! - deadline is too close.
 #!
@@ -430,20 +432,12 @@ pub proc fire_shot(row: u32, col: u32, deadline: u32)
     movup.3 drop dup.1 dup.1 assert_eq.err=ERR_FIRE_RESULT_PENDING
     # => [fired, processed, role, row, col, ...]
 
-    push.OPPONENT_SLOT[0..2] exec.active_account::get_item
-    # => [opp_prefix, opp_suffix, hits, received, fired, processed, role, row, col, ...]
-
-    drop drop drop
-    # => [received, fired, processed, role, row, col, ...]
-
-    dup.3 eq.ROLE_CHALLENGER
+    dup.2 eq.ROLE_CHALLENGER
     if.true
-        # challenger: fired == received, turn = 2 * fired + 1
-        dup.1 assert_eq.err=ERR_FIRE_NOT_YOUR_TURN
+        # challenger: turn = 2 * fired + 1
         dup mul.TURN_STRIDE add.1
     else
-        # acceptor: fired + 1 == received, turn = 2 * fired + 2
-        dup.1 add.1 assert_eq.err=ERR_FIRE_NOT_YOUR_TURN
+        # acceptor: turn = 2 * fired + 2
         dup mul.TURN_STRIDE add.TURN_STRIDE
     end
     # => [turn, fired, processed, role, row, col, ...]
