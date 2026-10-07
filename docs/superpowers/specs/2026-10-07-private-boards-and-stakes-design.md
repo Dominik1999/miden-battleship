@@ -1,6 +1,6 @@
 # Private boards, 12-hour forfeits and USDCx stakes
 
-Status: draft for review (2026-10-07). Target: partner mainnet in two weeks, real USDCx.
+Status: approved 2026-10-07; implementation plan in `docs/superpowers/plans/2026-10-07-private-boards-and-stakes.md`, whose "Spec refinements" section amends four details (script roots in storage, client-chosen deadlines, an `outcome` slot, anchoring against the verifier's own code commitment). Target: partner mainnet in two weeks, real USDCx.
 
 ## 1. Goals
 
