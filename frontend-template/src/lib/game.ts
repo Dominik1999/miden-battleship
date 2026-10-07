@@ -1,15 +1,14 @@
 /**
- * Client-level game orchestration shared by the React hooks: funding, setup, note publishing,
- * note discovery/classification and shot resolution. Everything here takes the raw
- * `WebClient` (as a narrow structural interface so tests can mock it) and mirrors
- * `project-template/integration/src/bin/validate_testnet.rs` step for step.
+ * Client-level game orchestration shared by the React hooks: funding, setup, handshake notes,
+ * note discovery/classification, moves (consume the opponent's notes + fire), reclaims, stakes
+ * and claims. Everything here takes the raw `WebClient` (as a narrow structural interface so
+ * tests can mock it) and mirrors `project-template/integration/src/helpers.rs` step for step.
  *
  * All calls that touch the WASM client must run inside the provider's `runExclusive` lock; the
  * hooks are responsible for that.
  */
 import {
   AccountId,
-  type Felt,
   NoteAndArgs,
   NoteAndArgsArray,
   NoteFilter,
@@ -20,62 +19,85 @@ import {
   TransactionId,
   TransactionRequestBuilder,
   type Account,
+  type Felt,
   type InputNoteRecord,
   type Note,
+  type NoteAssets,
+  type NoteMetadata,
+  type NoteRecipient,
   type TransactionProver,
   type TransactionRequest,
 } from "@miden-sdk/miden-sdk";
 import {
+  DEADLINE_DELTA_SECONDS,
   FAUCET_CLAIM_AMOUNT,
-  FUNDING_NOTE_TIMEOUT_MS,
-  MIDEN_FAUCET_URL,
-  NETWORK_POLL_INTERVAL_MS,
   SLOT_GAME_ID,
   SLOT_OPPONENT,
+  FUNDING_NOTE_TIMEOUT_MS,
+  HANDSHAKE_NOTE_ITEMS,
+  MIDEN_FAUCET_URL,
+  NETWORK_POLL_INTERVAL_MS,
+  RESULT_NOTE_ITEMS,
+  SHOT_NOTE_ITEMS,
+  STAKE_NOTE_ITEMS,
   TOTAL_SHIP_CELLS,
   TX_COMMIT_TIMEOUT_MS,
+  WALLET_NOTE_ITEMS,
 } from "@/config";
 import { getCellFromPacked, readBoardRow } from "@/lib/board";
-import { type ContractCompiler, type NoteScriptKind } from "@/lib/contracts";
+import { type ContractCompiler, type NoteScriptKind, type ScriptRoots } from "@/lib/contracts";
 import { claimFaucetTokens } from "@/lib/funding";
-import { randomWord } from "@/lib/miden";
 import { publishSyncHeight } from "@/lib/syncHeight";
 import {
+  addressOf,
   buildHandshakeStorage,
   buildNote,
-  createGameAccount,
-  buildResultRecipient,
-  buildRevealStorage,
   buildSetupPayload,
   buildSetupRequest,
-  buildShotStorage,
+  buildStakeNote,
+  createGameAccount,
+  createLocalWallet,
   decodeResult,
-  encodeResult,
+  expectedDefeatNote,
+  expectedForfeitNote,
+  expectedResultNote,
+  expectedShotNote,
   feltValues,
+  felts as feltsOf,
+  fireArgs,
+  randomValues,
+  shotNoteArgs,
   submitNoteDirect,
   submitRequest,
+  toWord,
   type FeltValues,
+  type StakeParties,
   type TxClient,
 } from "@/lib/notes";
-import { CELL_SHIP_1, CELL_SHIP_5, type ShipCell } from "@/types/game";
+import { readGameState } from "@/lib/state";
+import { CELL_SHIP_1, CELL_SHIP_5, PHASE_CHALLENGED, ROLE_CHALLENGER, type GameState, type ShipCell } from "@/types/game";
 
 const log = (msg: string, ...args: unknown[]) =>
   console.log(`%c[Game] ${msg}`, "color: #8cf; font-weight: bold", ...args);
+
+/** Output note records as the game reads them (`getOutputNotes`). */
+export interface OutputNoteLike {
+  recipient(): NoteRecipient | undefined;
+  metadata(): NoteMetadata;
+  assets(): NoteAssets;
+  isConsumed(): boolean;
+}
 
 /** The part of the WebClient the game flow needs (a strict subset of `WasmWebClient`). */
 export interface GameClient extends TxClient {
   syncState(): Promise<{ blockNum(): number }>;
   getInputNotes(filter: NoteFilter): Promise<InputNoteRecord[]>;
+  getOutputNotes(filter: NoteFilter): Promise<OutputNoteLike[]>;
   getAccount(accountId: AccountId): Promise<Account | undefined>;
   getTransactions(filter: TransactionFilter): Promise<{ id(): TransactionId; transactionStatus(): { isCommitted(): boolean; isDiscarded(): boolean } }[]>;
   feeFaucetId(): Promise<AccountId>;
-  getOutputNotes(filter: NoteFilter): Promise<
-    {
-      recipient(): { script(): { root(): { toHex(): string } }; storage(): { items(): Felt[] } } | undefined;
-      metadata(): { tag(): { asU32(): number } };
-    }[]
-  >;
-  newConsumeTransactionRequest(notes: Note[], consumingAccountId: AccountId): Promise<TransactionRequest>;
+  getSyncHeight(): Promise<number>;
+  getBlockHeaderByNumber(blockNum?: number | null): Promise<{ timestamp(): number }>;
   newAccount(account: unknown, overwrite: boolean): Promise<void>;
 }
 
@@ -101,10 +123,14 @@ export class GameAbortedError extends Error {
 const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
-      clearTimeout(t);
-      reject(new GameAbortedError());
-    }, { once: true });
+    signal?.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(t);
+        reject(new GameAbortedError());
+      },
+      { once: true },
+    );
   });
 
 function checkAborted(signal?: AbortSignal) {
@@ -119,6 +145,18 @@ export async function sync(ctx: GameContext): Promise<void> {
   } catch {
     // mock clients may not return a summary
   }
+}
+
+/** Timestamp (seconds) of the latest synced block: the reference block of the next transaction. */
+export async function blockTimestamp(ctx: GameContext): Promise<number> {
+  const height = await ctx.client.getSyncHeight();
+  const header = await ctx.client.getBlockHeaderByNumber(height);
+  return header.timestamp();
+}
+
+/** A deadline 12 hours after the latest synced block. */
+export async function deadlineFromNow(ctx: GameContext): Promise<number> {
+  return (await blockTimestamp(ctx)) + DEADLINE_DELTA_SECONDS;
 }
 
 // ---------------------------------------------------------------------------
@@ -151,11 +189,7 @@ export async function submitAndWait(ctx: GameContext, address: string, request: 
 }
 
 /** Syncs until a committed, unconsumed note matching `predicate` is in the local store. */
-export async function waitForNote(
-  ctx: GameContext,
-  predicate: (record: InputNoteRecord) => boolean,
-  timeoutMs: number,
-): Promise<InputNoteRecord> {
+export async function waitForNote(ctx: GameContext, predicate: (record: InputNoteRecord) => boolean, timeoutMs: number): Promise<InputNoteRecord> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     checkAborted(ctx.signal);
@@ -169,7 +203,7 @@ export async function waitForNote(
 }
 
 // ---------------------------------------------------------------------------
-// Funding
+// Funding and accounts
 // ---------------------------------------------------------------------------
 
 /** Fee-asset balance of a tracked account (0 when unknown). */
@@ -189,96 +223,70 @@ export async function fundFromFaucet(ctx: GameContext, address: string): Promise
   ctx.onStatus?.("Waiting for the funding note...");
   const record = await waitForNote(ctx, (r) => r.id()?.toString() === noteId, FUNDING_NOTE_TIMEOUT_MS);
   ctx.onStatus?.("Consuming the funding note (deploys the account)...");
-  await consumeNote(ctx, address, record.toNote());
+  await consumeNotes(ctx, address, [record.toNote()]);
   const balance = await feeBalance(ctx, address);
   log(`Funded ${address}: balance ${balance}`);
   return balance;
 }
 
-/** Compiles the component, creates a game account and funds it from the faucet. */
-export async function createAndFundGameAccount(ctx: GameContext): Promise<string> {
+/** Compiles the component, creates a private game account and funds it from the faucet. */
+export async function createAndFundGameAccount(ctx: GameContext): Promise<{ address: string; seed: FeltValues }> {
   ctx.onStatus?.("Compiling the battleship contract...");
   const component = await ctx.compiler.component();
   ctx.onStatus?.("Creating your game account...");
-  const address = await createGameAccount(ctx.client, component);
-  log(`Game account created: ${address}`);
+  const created = await createGameAccount(ctx.client, component);
+  log(`Game account created: ${created.address}`);
+  await fundFromFaucet(ctx, created.address);
+  return created;
+}
+
+/** Creates the local stand-in wallet and funds it from the faucet (it pays for stakes and claims). */
+export async function createAndFundWallet(ctx: GameContext): Promise<string> {
+  ctx.onStatus?.("Creating your wallet...");
+  const address = await createLocalWallet(ctx.client);
+  log(`Wallet created: ${address}`);
   await fundFromFaucet(ctx, address);
   return address;
 }
 
 // ---------------------------------------------------------------------------
-// Game transactions
+// Setup and handshake
 // ---------------------------------------------------------------------------
 
-/** Runs the setup transaction script: stores the board and names the opponent (CREATED → CHALLENGED). */
-export async function runSetup(
-  ctx: GameContext,
-  address: string,
-  gameId: FeltValues,
-  opponent: AccountId,
-  commitment: FeltValues,
-  cells: ShipCell[],
-): Promise<string> {
-  const payload = buildSetupPayload(gameId, opponent.prefix(), opponent.suffix(), commitment, cells);
-  const key = randomValues();
-  const request = buildSetupRequest(new TransactionRequestBuilder(), await ctx.compiler.txScript("setup"), payload, key);
+/** Runs the setup transaction script: stores the board, the wallet, the roots and names the opponent. */
+export async function runSetup(ctx: GameContext, address: string, gameId: FeltValues, opponent: AccountId, wallet: AccountId, cells: ShipCell[]): Promise<string> {
+  const roots = await ctx.compiler.scriptRoots();
+  const payload = buildSetupPayload(gameId, opponent, wallet, cells, roots);
+  const request = buildSetupRequest(new TransactionRequestBuilder(), await ctx.compiler.txScript("setup"), payload, randomValues());
   return submitAndWait(ctx, address, request);
 }
 
-/** Runs one of the argument-less transaction scripts (enter_reveal, mark_my_reveal). */
-export async function runTxScript(ctx: GameContext, address: string, kind: "enterReveal" | "markMyReveal"): Promise<string> {
-  const request = new TransactionRequestBuilder().withCustomScript(await ctx.compiler.txScript(kind)).build();
-  return submitAndWait(ctx, address, request);
+export interface HandshakeIdentity {
+  gameId: FeltValues;
+  seed: FeltValues;
+  wallet: string;
 }
 
-/** Builds and publishes a game note from `from` to `to`; resolves once it is committed. */
-export async function publishGameNote(
-  ctx: GameContext,
-  kind: NoteScriptKind,
-  from: string,
-  to: string,
-  storage: ReturnType<typeof buildHandshakeStorage>,
-): Promise<{ noteId: string }> {
-  const script = await ctx.compiler.noteScript(kind);
-  const { note, noteId } = buildNote(script, storage, AccountId.fromBech32(to), AccountId.fromBech32(from));
+/** Publishes my challenge or accept note (game id, my seed, my wallet, the pinned roots). */
+export async function publishHandshake(ctx: GameContext, kind: "challenge" | "accept", from: string, to: string, identity: HandshakeIdentity): Promise<{ noteId: string }> {
+  const roots = await ctx.compiler.scriptRoots();
+  const storage = buildHandshakeStorage(identity.gameId, AccountId.fromBech32(from), identity.seed, AccountId.fromBech32(identity.wallet), roots);
+  const note = buildNote(await ctx.compiler.noteScript(kind), storage, AccountId.fromBech32(to), AccountId.fromBech32(from));
+  const noteId = note.id().toString();
   const txId = await submitNoteDirect([note], from, ctx.client, ctx.prover);
   await waitForCommit(ctx, txId);
   return { noteId };
 }
 
-export function handshakeStorageFor(gameId: FeltValues, sender: AccountId, commitment: FeltValues) {
-  return buildHandshakeStorage(gameId, sender.prefix(), sender.suffix(), commitment);
-}
-
-export function revealStorageFor(commitment: FeltValues) {
-  return buildRevealStorage(commitment);
-}
-
-/** Four random field elements as plain values (game ids, commitments, serial numbers). */
-export function randomValues(): FeltValues {
-  return feltValues(randomWord().toFelts());
-}
-
-/** Publishes a shot note; returns the result serial the defender's result note will carry. */
-export async function publishShot(
-  ctx: GameContext,
-  from: string,
-  to: string,
-  row: number,
-  col: number,
-  turn: number,
-): Promise<{ noteId: string; resultSerial: FeltValues }> {
-  const resultSerial = randomValues();
-  const storage = buildShotStorage(row, col, turn, resultSerial, await ctx.compiler.resultScriptRoot());
-  const { noteId } = await publishGameNote(ctx, "shot", from, to, storage);
-  return { noteId, resultSerial };
-}
-
-/** Plain consume of a committed game note (challenge, accept, reveal, funding). */
-export async function consumeNote(ctx: GameContext, address: string, note: Note): Promise<string> {
-  const request = await ctx.client.newConsumeTransactionRequest([note], AccountId.fromBech32(address));
+/** Plain consume of committed notes (funding, challenge). */
+export async function consumeNotes(ctx: GameContext, address: string, notes: Note[]): Promise<string> {
+  const request = new TransactionRequestBuilder().withInputNotes(new NoteAndArgsArray(notes.map((n) => new NoteAndArgs(n)))).build();
   return submitAndWait(ctx, address, request);
 }
+
+// ---------------------------------------------------------------------------
+// Moves
+// ---------------------------------------------------------------------------
 
 export interface ShotOutcome {
   row: number;
@@ -293,82 +301,128 @@ export function predictShot(account: Account, row: number, col: number): { isHit
   const storage = account.storage();
   const cell = getCellFromPacked(readBoardRow(storage, row), col);
   const isHit = cell >= CELL_SHIP_1 && cell <= CELL_SHIP_5;
-  const opponent = storage.getItem(SLOT_OPPONENT);
-  const shipsHit = opponent ? Number(opponent.toU64s()[2] ?? 0n) : 0;
-  const gameOver = isHit && shipsHit + 1 >= TOTAL_SHIP_CELLS;
-  return { isHit, gameOver };
+  const shipsHit = readGameState(storage)?.shipsHitCount ?? 0;
+  return { isHit, gameOver: isHit && shipsHit + 1 >= TOTAL_SHIP_CELLS };
 }
 
-/**
- * Consumes an incoming shot note on the defender's account. The component creates the public
- * result note for the shooter; the request must declare its exact recipient, which the defender
- * can compute because it knows its own board.
- */
-export async function consumeShot(ctx: GameContext, address: string, record: InputNoteRecord): Promise<ShotOutcome> {
-  const note = record.toNote();
-  const shot = parseShotStorage(note);
-  const accountId = AccountId.fromBech32(address);
-  const account = await ctx.client.getAccount(accountId);
+/** The turn `state` fires next; before the handshake completes only the challenger's turn 1 is legal. */
+export function nextFireTurn(state: GameState): number {
+  return state.phase === PHASE_CHALLENGED || state.role === ROLE_CHALLENGER ? 2 * state.shotsFired + 1 : 2 * state.shotsFired + 2;
+}
+
+async function trackedAccount(ctx: GameContext, address: string): Promise<Account> {
+  const account = await ctx.client.getAccount(AccountId.fromBech32(address));
   if (!account) throw new Error("Game account not found in the local store");
-  const { isHit, gameOver } = predictShot(account, shot.row, shot.col);
-  const shooter = note.metadata().sender();
-  const recipient = buildResultRecipient(
-    shot.resultSerial,
-    await ctx.compiler.noteScript("result"),
-    shooter.prefix(),
-    shooter.suffix(),
-    shot.turn,
-    encodeResult(isHit, gameOver),
-  );
-  const request = new TransactionRequestBuilder()
-    .withInputNotes(new NoteAndArgsArray([new NoteAndArgs(note)]))
-    .withExpectedOutputRecipients(new NoteRecipientArray([recipient]))
-    .build();
-  log(`Resolving shot at (${shot.row}, ${shot.col}) turn ${shot.turn}: ${isHit ? "HIT" : "MISS"}${gameOver ? " (game over)" : ""}`);
-  await submitAndWait(ctx, address, request);
-  return { row: shot.row, col: shot.col, turn: shot.turn, isHit, gameOver };
+  return account;
 }
 
-/** The opponent and game id a game account stored during setup (null before setup). */
-export function readGameIdentity(account: Account): { opponent: AccountId; gameId: FeltValues } | null {
-  const storage = account.storage();
-  const opponent = storage.getItem(SLOT_OPPONENT)?.toFelts();
-  const gameId = storage.getItem(SLOT_GAME_ID)?.toFelts();
-  if (!opponent || !gameId || opponent[0].asInt() === 0n) return null;
-  return { opponent: AccountId.fromPrefixSuffix(opponent[0], opponent[1]), gameId: feltValues(gameId) };
+export interface PlannedShot {
+  args: FeltValues;
+  note: Note;
+  turn: number;
+  deadline: number;
 }
 
-/**
- * Whether this client already created a note of the given kind for `target` in game `gameId`
- * (e.g. the accept note). The store may still hold notes of earlier games, so the target tag and
- * the game id carried in the handshake storage are both checked.
- */
-export async function hasSentNote(ctx: GameContext, kind: "challenge" | "accept", target: string, gameId: FeltValues): Promise<boolean> {
-  const roots = await ctx.compiler.noteScriptRoots();
-  const root = roots[kind].toLowerCase();
-  const targetTag = NoteTag.withAccountTarget(AccountId.fromBech32(target)).asU32();
-  const records = await ctx.client.getOutputNotes(new NoteFilter(NoteFilterTypes.All));
-  return records.some((r) => {
-    try {
-      const recipient = r.recipient();
-      if (!recipient || recipient.script().root().toHex().toLowerCase() !== root) return false;
-      if (r.metadata().tag().asU32() !== targetTag) return false;
-      const items = recipient.storage().items();
-      return items.length === 10 && feltValues(items.slice(0, 4)).every((v, i) => v === gameId[i]);
-    } catch {
-      return false;
-    }
-  });
+/** Plans the shot `me` fires next at `opponent`: the fire args and the note the component creates. */
+export async function planShot(ctx: GameContext, me: string, opponent: string, row: number, col: number): Promise<PlannedShot> {
+  const state = readGameState((await trackedAccount(ctx, me)).storage());
+  if (!state) throw new Error("Game account has no state yet");
+  const turn = nextFireTurn(state);
+  const deadline = await deadlineFromNow(ctx);
+  const note = expectedShotNote(await ctx.compiler.noteScript("shot"), AccountId.fromBech32(me), AccountId.fromBech32(opponent), row, col, turn, deadline);
+  return { args: fireArgs(row, col, deadline), note, turn, deadline };
+}
+
+export interface PlannedResolution {
+  args: FeltValues;
+  result: Note;
+  defeat: Note | null;
+  outcome: ShotOutcome;
+  deadline: number;
+}
+
+/** Plans the resolution of an incoming shot on `me`: note args, the result note and the defeat note on the 17th hit. */
+export async function planResolution(ctx: GameContext, me: string, shot: Note): Promise<PlannedResolution> {
+  const parsed = parseShotStorage(shot);
+  const account = await trackedAccount(ctx, me);
+  const { isHit, gameOver } = predictShot(account, parsed.row, parsed.col);
+  const deadline = await deadlineFromNow(ctx);
+  const shooter = shot.metadata().sender();
+  const myId = AccountId.fromBech32(me);
+  const result = expectedResultNote(await ctx.compiler.noteScript("result"), myId, shooter, parsed.turn, isHit, gameOver, deadline);
+  let defeat: Note | null = null;
+  if (gameOver) {
+    const state = readGameState(account.storage());
+    if (!state?.opponentWallet) throw new Error("The opponent's wallet is unknown; the handshake has not completed");
+    const wallet = AccountId.fromPrefixSuffix(...(toFelts(state.opponentWallet) as [Felt, Felt]));
+    defeat = expectedDefeatNote(await ctx.compiler.noteScript("defeat"), myId, wallet);
+  }
+  return { args: shotNoteArgs(deadline), result, defeat, deadline, outcome: { row: parsed.row, col: parsed.col, turn: parsed.turn, isHit, gameOver } };
+}
+
+function toFelts(values: readonly bigint[]): Felt[] {
+  return feltsOf([...values]);
+}
+
+export interface Move {
+  inputs: { note: Note; args?: FeltValues }[];
+  expected: Note[];
+  fire?: FeltValues;
+}
+
+/** Submits a move as one transaction: the input notes are consumed first, then the fire script runs. */
+export async function submitMove(ctx: GameContext, me: string, move: Move): Promise<string> {
+  let builder = new TransactionRequestBuilder()
+    .withInputNotes(new NoteAndArgsArray(move.inputs.map(({ note, args }) => new NoteAndArgs(note, args ? toWord(args) : undefined))))
+    .withExpectedOutputRecipients(new NoteRecipientArray(move.expected.map((n) => n.recipient())));
+  if (move.fire) builder = builder.withCustomScript(await ctx.compiler.txScript("fire")).withScriptArg(toWord(move.fire));
+  return submitAndWait(ctx, me, builder.build());
+}
+
+/** Reclaims my own unanswered note after its deadline; returns the forfeit note sent to my wallet. */
+export async function reclaimNote(ctx: GameContext, me: string, note: Note): Promise<Note> {
+  const state = readGameState((await trackedAccount(ctx, me)).storage());
+  if (!state?.ownerWallet) throw new Error("Owner wallet unknown; the account is not set up");
+  const wallet = AccountId.fromPrefixSuffix(...(toFelts(state.ownerWallet) as [Felt, Felt]));
+  const forfeit = expectedForfeitNote(await ctx.compiler.noteScript("forfeit"), AccountId.fromBech32(me), wallet);
+  await submitMove(ctx, me, { inputs: [{ note }], expected: [forfeit] });
+  return forfeit;
+}
+
+/** Rebuilds my own shot note (to reclaim it) from the turn it was fired on. */
+export async function myShotNote(ctx: GameContext, me: string, opponent: string, row: number, col: number, turn: number, deadline: number): Promise<Note> {
+  return expectedShotNote(await ctx.compiler.noteScript("shot"), AccountId.fromBech32(me), AccountId.fromBech32(opponent), row, col, turn, deadline);
+}
+
+/** Rebuilds the result note my account created for the opponent's shot (to reclaim it). */
+export async function myResultNote(ctx: GameContext, me: string, shooter: string, outcome: ShotOutcome, deadline: number): Promise<Note> {
+  return expectedResultNote(await ctx.compiler.noteScript("result"), AccountId.fromBech32(me), AccountId.fromBech32(shooter), outcome.turn, outcome.isHit, outcome.gameOver, deadline);
+}
+
+// ---------------------------------------------------------------------------
+// Stakes (wallet transactions)
+// ---------------------------------------------------------------------------
+
+/** The wallet publishes a stake note of `amount` fee-asset units naming the opponent. */
+export async function publishStake(ctx: GameContext, parties: StakeParties, amount: bigint, expiry: number): Promise<Note> {
+  const feeFaucet = await ctx.client.feeFaucetId();
+  const note = buildStakeNote(await ctx.compiler.noteScript("stake"), parties, expiry, feeFaucet, amount);
+  const from = addressOf(parties.myWallet);
+  const txId = await submitNoteDirect([note], from, ctx.client, ctx.prover);
+  await waitForCommit(ctx, txId);
+  return note;
+}
+
+/** The wallet consumes a defeat/forfeit note together with the stake notes it unlocks (or refunds). */
+export async function claimNotes(ctx: GameContext, wallet: string, notes: Note[]): Promise<string> {
+  return consumeNotes(ctx, wallet, notes);
 }
 
 // ---------------------------------------------------------------------------
 // Note classification and parsing
 // ---------------------------------------------------------------------------
 
-export type ClassifiedNote =
-  | { kind: NoteScriptKind; record: InputNoteRecord }
-  | { kind: "funding"; record: InputNoteRecord }
-  | { kind: "unknown"; record: InputNoteRecord };
+export type ClassifiedNote = { kind: NoteScriptKind | "funding" | "unknown"; record: InputNoteRecord };
 
 function scriptRootHex(record: InputNoteRecord): string | null {
   try {
@@ -383,7 +437,7 @@ export async function classifyNote(ctx: GameContext, record: InputNoteRecord, fe
   const roots = await ctx.compiler.noteScriptRoots();
   const root = scriptRootHex(record);
   for (const kind of Object.keys(roots) as NoteScriptKind[]) {
-    if (roots[kind].toLowerCase() === root) return { kind, record };
+    if (roots[kind] === root) return { kind, record };
   }
   try {
     const carriesFee = record
@@ -412,20 +466,47 @@ export async function pendingNotesFor(ctx: GameContext, address: string): Promis
   });
 }
 
+/**
+ * Whether this client already created a note of the given kind for `target` in game `gameId`
+ * (e.g. the accept note). The store may still hold notes of earlier games, so the target tag and
+ * the game id carried in the handshake storage are both checked.
+ */
+export async function hasSentNote(ctx: GameContext, kind: "challenge" | "accept", target: string, gameId: FeltValues): Promise<boolean> {
+  const roots = await ctx.compiler.noteScriptRoots();
+  const targetTag = NoteTag.withAccountTarget(AccountId.fromBech32(target)).asU32();
+  const records = await ctx.client.getOutputNotes(new NoteFilter(NoteFilterTypes.All));
+  return records.some((r) => {
+    try {
+      const recipient = r.recipient();
+      if (!recipient || recipient.script().root().toHex().toLowerCase() !== roots[kind]) return false;
+      if (r.metadata().tag().asU32() !== targetTag) return false;
+      const items = recipient.storage().items();
+      return items.length === HANDSHAKE_NOTE_ITEMS && feltValues(items.slice(0, 4)).every((v, i) => v === gameId[i]);
+    } catch {
+      return false;
+    }
+  });
+}
+
 export interface HandshakeData {
   gameId: FeltValues;
   sender: AccountId;
-  commitment: FeltValues;
+  seed: FeltValues;
+  wallet: AccountId;
+  roots: ScriptRoots;
 }
 
-/** Parses challenge/accept note storage: [GAME_ID(4), sender_prefix, sender_suffix, COMMITMENT(4)]. */
+/** Parses challenge/accept note storage: [GAME_ID(4), sender(2), SEED(4), wallet(2), ROOTS(16)]. */
 export function parseHandshakeStorage(note: Note): HandshakeData {
-  const items = note.recipient().storage().items();
-  if (items.length !== 10) throw new Error(`Handshake note has ${items.length} storage items, expected 10`);
+  const items = feltValues(note.recipient().storage().items());
+  if (items.length !== HANDSHAKE_NOTE_ITEMS) throw new Error(`Handshake note has ${items.length} storage items, expected ${HANDSHAKE_NOTE_ITEMS}`);
+  const id = (at: number) => AccountId.fromPrefixSuffix(...(feltsOf(items.slice(at, at + 2)) as [Felt, Felt]));
   return {
-    gameId: feltValues(items.slice(0, 4)),
-    sender: AccountId.fromPrefixSuffix(items[4], items[5]),
-    commitment: feltValues(items.slice(6, 10)),
+    gameId: items.slice(0, 4),
+    sender: id(4),
+    seed: items.slice(6, 10),
+    wallet: id(10),
+    roots: { shot: items.slice(12, 16), result: items.slice(16, 20), defeat: items.slice(20, 24), forfeit: items.slice(24, 28) },
   };
 }
 
@@ -433,21 +514,14 @@ export interface ShotData {
   row: number;
   col: number;
   turn: number;
-  resultSerial: FeltValues;
-  resultScriptRoot: FeltValues;
+  deadline: number;
 }
 
-/** Parses shot note storage: [row, col, turn, RESULT_SERIAL(4), RESULT_SCRIPT_ROOT(4)]. */
+/** Parses shot note storage: [row, col, turn, deadline]. */
 export function parseShotStorage(note: Note): ShotData {
-  const items = note.recipient().storage().items();
-  if (items.length !== 11) throw new Error(`Shot note has ${items.length} storage items, expected 11`);
-  return {
-    row: Number(items[0].asInt()),
-    col: Number(items[1].asInt()),
-    turn: Number(items[2].asInt()),
-    resultSerial: feltValues(items.slice(3, 7)),
-    resultScriptRoot: feltValues(items.slice(7, 11)),
-  };
+  const items = feltValues(note.recipient().storage().items());
+  if (items.length !== SHOT_NOTE_ITEMS) throw new Error(`Shot note has ${items.length} storage items, expected ${SHOT_NOTE_ITEMS}`);
+  return { row: Number(items[0]), col: Number(items[1]), turn: Number(items[2]), deadline: Number(items[3]) };
 }
 
 export interface ResultData {
@@ -455,25 +529,52 @@ export interface ResultData {
   turn: number;
   isHit: boolean;
   isGameOver: boolean;
+  deadline: number;
 }
 
-/** Parses result note storage: [shooter_prefix, shooter_suffix, turn, encoded_result]. */
+/** Parses result note storage: [shooter_prefix, shooter_suffix, turn, encoded_result, deadline]. */
 export function parseResultStorage(note: Note): ResultData {
-  const items = note.recipient().storage().items();
-  if (items.length !== 4) throw new Error(`Result note has ${items.length} storage items, expected 4`);
-  const { isHit, isGameOver } = decodeResult(items[3].asInt());
-  return {
-    shooter: AccountId.fromPrefixSuffix(items[0], items[1]),
-    turn: Number(items[2].asInt()),
-    isHit,
-    isGameOver,
-  };
+  const items = feltValues(note.recipient().storage().items());
+  if (items.length !== RESULT_NOTE_ITEMS) throw new Error(`Result note has ${items.length} storage items, expected ${RESULT_NOTE_ITEMS}`);
+  const { isHit, isGameOver } = decodeResult(items[3]);
+  return { shooter: AccountId.fromPrefixSuffix(...(feltsOf(items.slice(0, 2)) as [Felt, Felt])), turn: Number(items[2]), isHit, isGameOver, deadline: Number(items[4]) };
 }
 
-/** Parses reveal note storage: [COMMITMENT(4)]. */
-export function parseRevealStorage(note: Note): FeltValues {
+/** Parses defeat/forfeit note storage: [wallet_prefix, wallet_suffix]. */
+export function parseWalletNoteStorage(note: Note): AccountId {
   const items = note.recipient().storage().items();
-  if (items.length !== 4) throw new Error(`Reveal note has ${items.length} storage items, expected 4`);
-  return feltValues(items.slice(0, 4));
+  if (items.length !== WALLET_NOTE_ITEMS) throw new Error(`Wallet note has ${items.length} storage items, expected ${WALLET_NOTE_ITEMS}`);
+  return AccountId.fromPrefixSuffix(items[0], items[1]);
 }
 
+export interface StakeData {
+  myWallet: AccountId;
+  myGame: AccountId;
+  oppWallet: AccountId;
+  oppGame: AccountId;
+  expiry: number;
+  amount: bigint;
+}
+
+/** Parses stake note storage and its fee-asset amount. */
+export function parseStakeNote(note: Note): StakeData {
+  const items = note.recipient().storage().items();
+  if (items.length !== STAKE_NOTE_ITEMS) throw new Error(`Stake note has ${items.length} storage items, expected ${STAKE_NOTE_ITEMS}`);
+  const id = (at: number) => AccountId.fromPrefixSuffix(items[at], items[at + 1]);
+  const amount = note
+    .assets()
+    .fungibleAssets()
+    .reduce((sum, a) => sum + a.amount(), 0n);
+  return { myWallet: id(0), myGame: id(2), oppWallet: id(4), oppGame: id(6), expiry: Number(items[8].asInt()), amount };
+}
+
+/** The opponent and game id a game account stored during setup (null before setup). */
+export function readGameIdentity(account: Account): { opponent: AccountId; gameId: FeltValues } | null {
+  const storage = account.storage();
+  const state = readGameState(storage);
+  const gameId = storage.getItem(SLOT_GAME_ID)?.toFelts();
+  if (!state || !gameId) return null;
+  const opponent = storage.getItem(SLOT_OPPONENT)?.toFelts();
+  if (!opponent || opponent[0].asInt() === 0n) return null;
+  return { opponent: AccountId.fromPrefixSuffix(opponent[0], opponent[1]), gameId: feltValues(gameId) };
+}

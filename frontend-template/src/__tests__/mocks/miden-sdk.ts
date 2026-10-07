@@ -34,6 +34,10 @@ export class FeltArray {
 
 export class Word {
   constructor(readonly values: bigint[]) {}
+  static fromHex(hex: string): Word {
+    const clean = hex.replace(/^0x/, "").padStart(64, "0");
+    return new Word([0, 1, 2, 3].map((i) => BigInt("0x" + clean.slice(i * 16, i * 16 + 16))));
+  }
   static newFromFelts(felts: Felt[]): Word {
     return new Word(felts.map((f) => f.asInt()));
   }
@@ -49,21 +53,25 @@ export class Word {
 }
 
 export class AccountId {
-  constructor(readonly hex: string) {}
+  constructor(
+    readonly hex: string,
+    private readonly values?: [bigint, bigint],
+  ) {}
   static fromBech32(addr: string): AccountId {
     return new AccountId(addr);
   }
   static fromHex(hex: string): AccountId {
     return new AccountId(hex);
   }
+  /** Round-trips: the id built from (prefix, suffix) reports exactly those values. */
   static fromPrefixSuffix(prefix: Felt, suffix: Felt): AccountId {
-    return new AccountId(`id:${prefix.asInt()}:${suffix.asInt()}`);
+    return new AccountId(`id:${prefix.asInt()}:${suffix.asInt()}`, [prefix.asInt(), suffix.asInt()]);
   }
   prefix(): Felt {
-    return new Felt(BigInt(hashString(this.hex + ":p")));
+    return new Felt(this.values ? this.values[0] : BigInt(hashString(this.hex + ":p")));
   }
   suffix(): Felt {
-    return new Felt(BigInt(hashString(this.hex + ":s")));
+    return new Felt(this.values ? this.values[1] : BigInt(hashString(this.hex + ":s")));
   }
   toString(): string {
     return this.hex;
@@ -97,8 +105,24 @@ export class NoteTag {
 
 export const NoteType = { Public: 1, Private: 2 } as const;
 
+export class FungibleAsset {
+  constructor(
+    readonly faucet: AccountId,
+    readonly value: bigint,
+  ) {}
+  faucetId() {
+    return this.faucet;
+  }
+  amount() {
+    return this.value;
+  }
+}
+
 export class NoteAssets {
-  constructor(readonly fungible: { faucetId(): AccountId; amount(): bigint }[] = []) {}
+  readonly fungible: FungibleAsset[];
+  constructor(assets: FungibleAsset[] | null = []) {
+    this.fungible = assets ? [...assets] : [];
+  }
   fungibleAssets() {
     return this.fungible;
   }
@@ -183,7 +207,10 @@ export class NoteArray {
   constructor(readonly notes: Note[]) {}
 }
 export class NoteAndArgs {
-  constructor(readonly note: Note) {}
+  constructor(
+    readonly note: Note,
+    readonly args?: Word | null,
+  ) {}
 }
 export class NoteAndArgsArray {
   constructor(readonly items: NoteAndArgs[]) {}
@@ -256,14 +283,17 @@ export class TransactionFilter {
   }
 }
 
-export const AccountType = { Public: 1 };
-export const AccountStorageMode = { public: () => "public" };
+export const AccountType = { Private: 0, Public: 1 };
+export const AccountStorageMode = { public: () => "public", private: () => "private" };
+let nextAccount = 1;
 export class AccountBuilder {
+  mode = "public";
   constructor(readonly seed: Uint8Array) {}
   accountType() {
     return this;
   }
-  storageMode() {
+  storageMode(mode: string) {
+    this.mode = mode;
     return this;
   }
   withComponent() {
@@ -276,7 +306,12 @@ export class AccountBuilder {
     return this;
   }
   build() {
-    return { account: { id: () => new AccountId("mtst1newaccount") } };
+    const n = nextAccount++;
+    const account = {
+      id: () => new AccountId(`mtst1${this.mode}account${n}`),
+      storage: () => ({ commitment: () => new Word([11n, 22n, 33n, 44n]) }),
+    };
+    return { account, seed: new Word([BigInt(n), 2n, 3n, 4n]) };
   }
 }
 
@@ -300,11 +335,11 @@ function hashString(s: string): number {
 }
 
 /** Test helper: a public game note with the given script root and storage felts. */
-export function makeTestNote(opts: { sender: string; target: string; root: string; storage: bigint[]; serial?: bigint[] }): Note {
+export function makeTestNote(opts: { sender: string; target: string; root: string; storage: bigint[]; serial?: bigint[]; assets?: FungibleAsset[] }): Note {
   const storage = new NoteStorage(new FeltArray(opts.storage.map((v) => new Felt(v))));
   const recipient = new NoteRecipient(new Word(opts.serial ?? [1n, 2n, 3n, 4n]), new NoteScript(opts.root), storage);
   const metadata = new NoteMetadata(AccountId.fromBech32(opts.sender), NoteType.Public, NoteTag.withAccountTarget(AccountId.fromBech32(opts.target)));
-  return new Note(new NoteAssets(), metadata, recipient);
+  return new Note(new NoteAssets(opts.assets ?? []), metadata, recipient);
 }
 
 /** Test helper: an InputNoteRecord-like wrapper around a note. */

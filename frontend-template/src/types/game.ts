@@ -14,20 +14,37 @@ export type CellState = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 export const PHASE_CREATED = 0;
 export const PHASE_CHALLENGED = 1;
 export const PHASE_ACTIVE = 2;
-export const PHASE_REVEAL = 3;
-export const PHASE_COMPLETE = 4;
+export const PHASE_COMPLETE = 3;
 
-export type GamePhase = 0 | 1 | 2 | 3 | 4;
+export type GamePhase = 0 | 1 | 2 | 3;
+
+/** Roles stored in `turn_state[2]` once the handshake completes. */
+export const ROLE_CHALLENGER = 1;
+export const ROLE_ACCEPTOR = 2;
+
+/** Outcomes stored in `outcome[0]`. */
+export const OUTCOME_OPEN = 0;
+export const OUTCOME_WON = 1;
+export const OUTCOME_LOST = 2;
+export const OUTCOME_WON_BY_FORFEIT = 3;
+
+export type Outcome = 0 | 1 | 2 | 3;
 
 export interface GameState {
   phase: GamePhase;
   expectedTurn: number;
   shipsHitCount: number;
   totalShotsReceived: number;
-  /** reveal_status[0]: this account has sent and marked its reveal */
-  myRevealed: number;
-  /** reveal_status[1]: the opponent's reveal was verified */
-  opponentVerified: number;
+  shotsFired: number;
+  resultsProcessed: number;
+  /** 0 before the handshake, then ROLE_CHALLENGER or ROLE_ACCEPTOR. */
+  role: number;
+  lastShot: { row: number; col: number; turn: number };
+  outcome: Outcome;
+  /** [prefix, suffix] of the owner wallet (null before setup). */
+  ownerWallet: [bigint, bigint] | null;
+  /** [prefix, suffix] of the opponent's wallet (null before the handshake). */
+  opponentWallet: [bigint, bigint] | null;
 }
 
 export interface BoardCell {

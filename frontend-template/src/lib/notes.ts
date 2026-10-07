@@ -13,6 +13,7 @@ import {
   AccountStorageMode,
   AccountType,
   Address,
+  FungibleAsset,
   NetworkId,
   Felt,
   FeltArray,
@@ -24,8 +25,16 @@ import {
   type TransactionRequestBuilder,
   type TransactionScript,
 } from "@miden-sdk/miden-sdk";
-import { randomWord } from "@/lib/miden";
 import { packBoard } from "@/lib/board";
+import { scriptRootFelts, type ScriptRoots } from "@/lib/contracts";
+import {
+  HANDSHAKE_NOTE_ITEMS,
+  SERIAL_KIND_DEFEAT,
+  SERIAL_KIND_FORFEIT,
+  SERIAL_KIND_RESULT,
+  SERIAL_KIND_SHOT,
+  SETUP_PAYLOAD_ITEMS,
+} from "@/config";
 import type { ShipCell } from "@/types/game";
 
 const log = (msg: string, ...args: unknown[]) =>
@@ -40,6 +49,7 @@ export type FeltValues = bigint[];
 
 export const felts = (values: FeltValues): Felt[] => values.map((v) => new Felt(v));
 export const feltValues = (handles: Felt[]): FeltValues => handles.map((f) => f.asInt());
+export const toWord = (values: FeltValues): Word => Word.newFromFelts(felts(values.slice(0, 4)));
 
 /** The part of the WebClient needed to build and submit transactions. */
 export interface TxClient {
@@ -52,78 +62,85 @@ export interface TxClient {
   ): Promise<{ toHex(): string }>;
 }
 
+/** [prefix, suffix] of an account id as plain values. */
+export function idValues(id: AccountId): [bigint, bigint] {
+  return [id.prefix().asInt(), id.suffix().asInt()];
+}
+
+/** bech32 address of an account given its (prefix, suffix) as stored in notes/slots. */
+export function addressFromValues(prefix: bigint, suffix: bigint): string {
+  return Address.fromAccountId(AccountId.fromPrefixSuffix(new Felt(prefix), new Felt(suffix))).toBech32(NetworkId.testnet());
+}
+
+export function addressOf(id: AccountId): string {
+  return Address.fromAccountId(id).toBech32(NetworkId.testnet());
+}
+
 // ---------------------------------------------------------------------------
-// Payload / storage builders (pure)
+// Payload / storage builders (pure values; mirror battleship.rs)
 // ---------------------------------------------------------------------------
 
-/** Setup payload: game_id(4) + opponent(prefix, suffix) + commitment(4) + packed_rows(10) = 20 felts */
+/** Setup payload: game_id(4) + opponent(2) + owner_wallet(2) + packed rows(10) + roots(16) + pad(2) = 36. */
 export function buildSetupPayload(
   gameId: FeltValues,
-  oppPrefix: Felt,
-  oppSuffix: Felt,
-  commitment: FeltValues,
+  opponent: AccountId,
+  ownerWallet: AccountId,
   shipCells: ShipCell[],
-): Felt[] {
-  return [
-    ...felts(gameId.slice(0, 4)),
-    oppPrefix,
-    oppSuffix,
-    ...felts(commitment.slice(0, 4)),
-    ...felts(packBoard(shipCells)),
-  ];
+  roots: ScriptRoots,
+): FeltValues {
+  const payload = [...gameId.slice(0, 4), ...idValues(opponent), ...idValues(ownerWallet), ...packBoard(shipCells), ...scriptRootFelts(roots), 0n, 0n];
+  if (payload.length !== SETUP_PAYLOAD_ITEMS) throw new Error(`setup payload has ${payload.length} items`);
+  return payload;
 }
 
-/**
- * Build the setup transaction request: the 20-felt payload is placed in the advice
- * map under `key`, and the same key is passed as the transaction script argument so
- * the script can `adv.push_mapvaln` it. Two `Word`s are built from fresh felts because
- * wasm-bindgen moves each one into the SDK.
- */
-export function buildSetupRequest(
-  builder: TransactionRequestBuilder,
-  setupScript: TransactionScript,
-  payload: Felt[],
-  key: FeltValues,
-): TransactionRequest {
-  const adviceMap = new AdviceMap();
-  adviceMap.insert(Word.newFromFelts(felts(key)), new FeltArray(payload));
-  return builder
-    .withCustomScript(setupScript)
-    .withScriptArg(Word.newFromFelts(felts(key)))
-    .extendAdviceMap(adviceMap)
-    .build();
+/** Challenge/accept note storage: game_id(4) + sender(2) + seed(4) + wallet(2) + roots(16) = 28. */
+export function buildHandshakeStorage(gameId: FeltValues, sender: AccountId, seed: FeltValues, wallet: AccountId, roots: ScriptRoots): FeltValues {
+  const items = [...gameId.slice(0, 4), ...idValues(sender), ...seed.slice(0, 4), ...idValues(wallet), ...scriptRootFelts(roots)];
+  if (items.length !== HANDSHAKE_NOTE_ITEMS) throw new Error(`handshake storage has ${items.length} items`);
+  return items;
 }
 
-/** Challenge/accept note storage: game_id(4) + sender(prefix, suffix) + commitment(4) = 10 felts */
-export function buildHandshakeStorage(
-  gameId: FeltValues,
-  senderPrefix: Felt,
-  senderSuffix: Felt,
-  commitment: FeltValues,
-): FeltArray {
-  return new FeltArray([...felts(gameId.slice(0, 4)), senderPrefix, senderSuffix, ...felts(commitment.slice(0, 4))]);
+/** Shot note storage: [row, col, turn, deadline]. */
+export function shotStorage(row: number, col: number, turn: number, deadline: number): FeltValues {
+  return [BigInt(row), BigInt(col), BigInt(turn), BigInt(deadline)];
 }
 
-/** Shot note storage: row, col, turn, result_serial_num(4), result_script_root(4) = 11 felts */
-export function buildShotStorage(
-  row: number,
-  col: number,
-  turn: number,
-  resultSerial: FeltValues,
-  resultScriptRoot: FeltValues,
-): FeltArray {
-  return new FeltArray([
-    new Felt(BigInt(row)),
-    new Felt(BigInt(col)),
-    new Felt(BigInt(turn)),
-    ...felts(resultSerial.slice(0, 4)),
-    ...felts(resultScriptRoot.slice(0, 4)),
-  ]);
+/** Result note storage: [shooter_prefix, shooter_suffix, turn, encoded_result, deadline]. */
+export function resultStorage(shooter: AccountId, turn: number, isHit: boolean, gameOver: boolean, deadline: number): FeltValues {
+  return [...idValues(shooter), BigInt(turn), encodeResult(isHit, gameOver), BigInt(deadline)];
 }
 
-/** Reveal note storage: commitment(4) */
-export function buildRevealStorage(commitment: FeltValues): FeltArray {
-  return new FeltArray(felts(commitment.slice(0, 4)));
+/** Defeat / forfeit note storage: the target wallet. */
+export function walletNoteStorage(wallet: AccountId): FeltValues {
+  return [...idValues(wallet)];
+}
+
+/** Stake note storage: my wallet, my game, opponent wallet, opponent game, expiry. */
+export function stakeStorage(parties: StakeParties, expiry: number): FeltValues {
+  return [...idValues(parties.myWallet), ...idValues(parties.myGame), ...idValues(parties.oppWallet), ...idValues(parties.oppGame), BigInt(expiry)];
+}
+
+export interface StakeParties {
+  myWallet: AccountId;
+  myGame: AccountId;
+  oppWallet: AccountId;
+  oppGame: AccountId;
+}
+
+/** Serial number of a note a game account creates itself: [prefix, suffix, turn, kind]. */
+export function ownSerial(account: AccountId, turn: number, kind: number): FeltValues {
+  return [...idValues(account), BigInt(turn), BigInt(kind)];
+}
+
+/** Transaction script argument of `scripts/fire_tx.masm`. */
+export function fireArgs(row: number, col: number, deadline: number): FeltValues {
+  return [BigInt(row), BigInt(col), BigInt(deadline), 0n];
+}
+
+/** Note argument the defender passes when consuming a shot note: the result note's deadline. */
+export function shotNoteArgs(resultDeadline: number): FeltValues {
+  const d = BigInt(resultDeadline);
+  return [d, d, d, d];
 }
 
 /** Encode a shot result the way the contract does: is_hit * 2 + game_over. */
@@ -136,77 +153,92 @@ export function decodeResult(encoded: bigint): { isHit: boolean; isGameOver: boo
   return { isHit: encoded / 2n === 1n, isGameOver: encoded % 2n === 1n };
 }
 
-/**
- * Recipient of the result note the defender's component creates when it consumes
- * a shot note: storage [shooter_prefix, shooter_suffix, turn, encoded_result],
- * the serial number from the shot note and the result note script.
- */
-export function buildResultRecipient(
-  serialNum: FeltValues,
-  resultScript: NoteScript,
-  shooterPrefix: Felt,
-  shooterSuffix: Felt,
-  turn: number,
-  encodedResult: bigint,
-): NoteRecipient {
-  const storage = new NoteStorage(
-    new FeltArray([shooterPrefix, shooterSuffix, new Felt(BigInt(turn)), new Felt(encodedResult)]),
-  );
-  return new NoteRecipient(Word.newFromFelts(felts(serialNum)), resultScript, storage);
+/** Random felt values (each < 2^32): game ids, note serials. */
+export function randomValues(): FeltValues {
+  const words = crypto.getRandomValues(new Uint32Array(4));
+  return Array.from(words, (v) => BigInt(v));
 }
 
 // ---------------------------------------------------------------------------
 // Notes
 // ---------------------------------------------------------------------------
 
-/** Build a public note (no assets) targeting `targetAccount`, sent by `senderId`. */
+/** Build a public note targeting `target`, sent by `sender`, with the given serial and assets. */
 export function buildNote(
   noteScript: NoteScript,
-  storage: FeltArray,
-  targetAccount: AccountId,
-  senderId: AccountId,
-): { note: Note; noteId: string; tag: number } {
-  const recipient = new NoteRecipient(randomWord(), noteScript, new NoteStorage(storage));
-  const noteTag = NoteTag.withAccountTarget(targetAccount);
-  const tag = noteTag.asU32();
-  const metadata = new NoteMetadata(senderId, NoteType.Public, noteTag);
-  const note = new Note(new NoteAssets(), metadata, recipient);
-  // Read the id BEFORE the note is moved into a NoteArray (wasm-bindgen moves by-value args).
-  const noteId = note.id().toString();
-  log(`Built note — ID: ${noteId}, tag: ${tag}`);
-  return { note, noteId, tag };
+  storage: FeltValues,
+  target: AccountId,
+  sender: AccountId,
+  serial: FeltValues = randomValues(),
+  assets: NoteAssets = new NoteAssets(),
+): Note {
+  const recipient = new NoteRecipient(toWord(serial), noteScript, new NoteStorage(new FeltArray(felts(storage))));
+  const metadata = new NoteMetadata(sender, NoteType.Public, NoteTag.withAccountTarget(target));
+  return new Note(assets, metadata, recipient);
 }
 
-/** Submit a built request from a game account, with the remote prover when available. */
-export async function submitRequest(
-  client: TxClient,
-  gameAccountAddress: string,
-  request: TransactionRequest,
-  prover?: TransactionProver | null,
-): Promise<string> {
-  const accountId = AccountId.fromBech32(gameAccountAddress);
-  const txId = prover
-    ? await client.submitNewTransactionWithProver(accountId, request, prover)
-    : await client.submitNewTransaction(accountId, request);
+/** The shot note `fire_shot` creates on `shooter` for `defender`. */
+export function expectedShotNote(script: NoteScript, shooter: AccountId, defender: AccountId, row: number, col: number, turn: number, deadline: number): Note {
+  return buildNote(script, shotStorage(row, col, turn, deadline), defender, shooter, ownSerial(shooter, turn, SERIAL_KIND_SHOT));
+}
+
+/** The result note `process_shot` creates on `defender` for `shooter`. */
+export function expectedResultNote(
+  script: NoteScript,
+  defender: AccountId,
+  shooter: AccountId,
+  turn: number,
+  isHit: boolean,
+  gameOver: boolean,
+  deadline: number,
+): Note {
+  return buildNote(script, resultStorage(shooter, turn, isHit, gameOver, deadline), shooter, defender, ownSerial(defender, turn, SERIAL_KIND_RESULT));
+}
+
+/** The defeat note `process_shot` creates on `loser` for `winnerWallet` on the 17th hit. */
+export function expectedDefeatNote(script: NoteScript, loser: AccountId, winnerWallet: AccountId): Note {
+  return buildNote(script, walletNoteStorage(winnerWallet), winnerWallet, loser, ownSerial(loser, 0, SERIAL_KIND_DEFEAT));
+}
+
+/** The forfeit note `claim_forfeit` creates on `claimant` for its `ownerWallet`. */
+export function expectedForfeitNote(script: NoteScript, claimant: AccountId, ownerWallet: AccountId): Note {
+  return buildNote(script, walletNoteStorage(ownerWallet), ownerWallet, claimant, ownSerial(claimant, 0, SERIAL_KIND_FORFEIT));
+}
+
+/** A stake note from `myWallet` holding `amount` of the fee asset, tagged for the opponent's wallet. */
+export function buildStakeNote(script: NoteScript, parties: StakeParties, expiry: number, feeFaucet: AccountId, amount: bigint): Note {
+  const assets = new NoteAssets([new FungibleAsset(feeFaucet, amount)]);
+  return buildNote(script, stakeStorage(parties, expiry), parties.oppWallet, parties.myWallet, randomValues(), assets);
+}
+
+/**
+ * Build the setup transaction request: the 36-felt payload is placed in the advice map under
+ * `key`, and the same key is passed as the transaction script argument so the script can
+ * `adv.push_mapvaln` it. Two `Word`s are built from fresh felts because wasm-bindgen moves
+ * each one into the SDK.
+ */
+export function buildSetupRequest(builder: TransactionRequestBuilder, setupScript: TransactionScript, payload: FeltValues, key: FeltValues): TransactionRequest {
+  const adviceMap = new AdviceMap();
+  adviceMap.insert(toWord(key), new FeltArray(felts(payload)));
+  return builder.withCustomScript(setupScript).withScriptArg(toWord(key)).extendAdviceMap(adviceMap).build();
+}
+
+/** Submit a built request from an account, with the remote prover when available. */
+export async function submitRequest(client: TxClient, address: string, request: TransactionRequest, prover?: TransactionProver | null): Promise<string> {
+  const accountId = AccountId.fromBech32(address);
+  const txId = prover ? await client.submitNewTransactionWithProver(accountId, request, prover) : await client.submitNewTransaction(accountId, request);
   return txId.toHex();
 }
 
 /**
- * Submit note(s) directly from a no-auth game account — no wallet popup needed.
- * The fee is paid from the game account's vault (fee-aware request builder).
+ * Submit note(s) directly from a no-auth account (a game account or the local wallet). The fee
+ * is paid from the account's vault (fee-aware request builder).
  */
-export async function submitNoteDirect(
-  notes: Note[],
-  gameAccountAddress: string,
-  client: TxClient,
-  prover?: TransactionProver | null,
-): Promise<string> {
-  const builder = await client.feeAwareTransactionRequestBuilder(
-    AccountId.fromBech32(gameAccountAddress),
-  );
+export async function submitNoteDirect(notes: Note[], address: string, client: TxClient, prover?: TransactionProver | null): Promise<string> {
+  const builder = await client.feeAwareTransactionRequestBuilder(AccountId.fromBech32(address));
   const request = builder.withOwnOutputNotes(new NoteArray(notes)).build();
-  log(`Submitting ${notes.length} note(s) directly from game account (no wallet popup)...`);
-  const txId = await submitRequest(client, gameAccountAddress, request, prover);
+  log(`Submitting ${notes.length} note(s) from ${address}...`);
+  const txId = await submitRequest(client, address, request, prover);
   log(`${notes.length} note(s) submitted — tx ${txId}`);
   return txId;
 }
@@ -215,31 +247,45 @@ export async function submitNoteDirect(
 // Accounts
 // ---------------------------------------------------------------------------
 
+export interface AccountClient {
+  newAccount(account: unknown, overwrite: boolean): Promise<void>;
+}
+
 /**
- * Create a public game account: battleship component + BasicWallet (to receive the
- * USDCx funding note) + NoAuth (pays fees itself; no keys, no popups).
- * The account is only deployed on-chain by its first transaction.
+ * Create a PRIVATE game account: battleship component + BasicWallet (to receive the fee
+ * asset) + NoAuth (pays fees itself; no keys, no popups). The account is only deployed
+ * on-chain by its first transaction. The seed is carried in the handshake notes so the
+ * opponent's account can verify that this account runs the same code.
  */
-export async function createGameAccount(
-  client: { newAccount(account: unknown, overwrite: boolean): Promise<void> },
-  component: AccountComponent,
-): Promise<string> {
-  const seed = crypto.getRandomValues(new Uint8Array(32));
-  const { account } = new AccountBuilder(seed)
-    .accountType(AccountType.Public)
-    .storageMode(AccountStorageMode.public())
+export async function createGameAccount(client: AccountClient, component: AccountComponent): Promise<{ address: string; seed: FeltValues }> {
+  const initSeed = crypto.getRandomValues(new Uint8Array(32));
+  const { account, seed } = new AccountBuilder(initSeed)
+    .accountType(AccountType.Private)
+    .storageMode(AccountStorageMode.private())
     .withComponent(component)
     .withBasicWalletComponent()
     .withNoAuthComponent()
     .build();
-  // Read the address before handing the account handle to the client.
-  const address = Address.fromAccountId(account.id()).toBech32(NetworkId.testnet());
+  // Read the address and seed before handing the account handle to the client.
+  const address = addressOf(account.id());
+  const seedValues = feltValues(seed.toFelts());
   await client.newAccount(account, false);
-  return address;
+  return { address, seed: seedValues };
 }
 
-/** bech32 address of an account given its (prefix, suffix) felts as stored in notes/slots. */
-export function addressFromPrefixSuffix(prefix: Felt, suffix: Felt): string {
-  const id = AccountId.fromPrefixSuffix(prefix, suffix);
-  return Address.fromAccountId(id).toBech32(NetworkId.testnet());
+/**
+ * Create a public NoAuth wallet in the local client: the testnet stand-in for the player's
+ * wallet. It receives defeat/forfeit notes, publishes stake notes and claims the stakes.
+ */
+export async function createLocalWallet(client: AccountClient): Promise<string> {
+  const initSeed = crypto.getRandomValues(new Uint8Array(32));
+  const { account } = new AccountBuilder(initSeed)
+    .accountType(AccountType.Public)
+    .storageMode(AccountStorageMode.public())
+    .withBasicWalletComponent()
+    .withNoAuthComponent()
+    .build();
+  const address = addressOf(account.id());
+  await client.newAccount(account, false);
+  return address;
 }

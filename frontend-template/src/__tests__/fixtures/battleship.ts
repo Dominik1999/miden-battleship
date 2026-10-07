@@ -24,30 +24,39 @@ function mockWord(values: [bigint, bigint, bigint, bigint]) {
  * game_config = [grid_size, num_placed, phase, expected_turn]
  * opponent = [opp_prefix, opp_suffix, ships_hit_count, total_shots_received]
  */
-export function createMockGameStorage(opts: {
+export interface MockGameStorageOptions {
   phase: number;
   expectedTurn: number;
   shipsHitCount: number;
   totalShotsReceived: number;
+  shotsFired?: number;
+  resultsProcessed?: number;
+  role?: number;
+  outcome?: number;
+  lastShot?: [number, number, number];
+  /** [prefix, suffix] of the opponent game account. */
+  opponent?: [bigint, bigint];
+  ownerWallet?: [bigint, bigint];
+  opponentWallet?: [bigint, bigint];
   boardCells?: Map<string, number>;
-  revealStatus?: [number, number];
-}) {
+}
+
+export function createMockGameStorage(opts: MockGameStorageOptions) {
+  const SLOT = "miden_battleship_account::battleship_account";
   const gameConfig = mockWord([10n, 17n, BigInt(opts.phase), BigInt(opts.expectedTurn)]);
-  const opponent = mockWord([0n, 0n, BigInt(opts.shipsHitCount), BigInt(opts.totalShotsReceived)]);
+  const [op, os] = opts.opponent ?? [0n, 0n];
+  const opponent = mockWord([op, os, BigInt(opts.shipsHitCount), BigInt(opts.totalShotsReceived)]);
+  const last = opts.lastShot ?? [0, 0, 0];
 
   const slotMap: Record<string, ReturnType<typeof mockWord>> = {
-    "miden_battleship_account::battleship_account::game_config": gameConfig,
-    "miden_battleship_account::battleship_account::opponent": opponent,
+    [`${SLOT}::game_config`]: gameConfig,
+    [`${SLOT}::opponent`]: opponent,
+    [`${SLOT}::turn_state`]: mockWord([BigInt(opts.shotsFired ?? 0), BigInt(opts.resultsProcessed ?? 0), BigInt(opts.role ?? 0), 0n]),
+    [`${SLOT}::last_shot`]: mockWord([BigInt(last[0]), BigInt(last[1]), BigInt(last[2]), 0n]),
+    [`${SLOT}::outcome`]: mockWord([BigInt(opts.outcome ?? 0), 0n, 0n, 0n]),
+    [`${SLOT}::owner_wallet`]: mockWord([...(opts.ownerWallet ?? [0n, 0n]), 0n, 0n] as [bigint, bigint, bigint, bigint]),
+    [`${SLOT}::opponent_wallet`]: mockWord([...(opts.opponentWallet ?? [0n, 0n]), 0n, 0n] as [bigint, bigint, bigint, bigint]),
   };
-
-  if (opts.revealStatus) {
-    slotMap["miden_battleship_account::battleship_account::reveal_status"] = mockWord([
-      BigInt(opts.revealStatus[0]),
-      BigInt(opts.revealStatus[1]),
-      0n,
-      0n,
-    ]);
-  }
 
   // Pack board cells into per-row map entries matching how board.ts reads them:
   // key [0, 0, 0, row] -> [packed_row, 0, 0, 0], packed |= (cellState << (col * 3)).
@@ -61,7 +70,10 @@ export function createMockGameStorage(opts: {
   }
 
   return {
-    getItem: vi.fn((slotName: string) => slotMap[slotName] ?? undefined),
+    getItem: vi.fn((slotName: string) => {
+      const word = slotMap[slotName];
+      return word ? { ...word, toFelts: () => word.toU64s().map((v) => ({ asInt: () => v })) } : undefined;
+    }),
     getMapItem: vi.fn((slotName: string, key: { toU64s(): ArrayLike<bigint> }) => {
       if (slotName !== "miden_battleship_account::battleship_account::my_board") return undefined;
       const packed = rowPacked.get(Number(key.toU64s()[3]));
@@ -71,22 +83,13 @@ export function createMockGameStorage(opts: {
 }
 
 /** Mock account with game storage in ACTIVE phase */
-export function createMockGameAccount(opts: {
-  id: string;
-  phase?: number;
-  expectedTurn?: number;
-  shipsHitCount?: number;
-  totalShotsReceived?: number;
-  boardCells?: Map<string, number>;
-  revealStatus?: [number, number];
-}) {
+export function createMockGameAccount(opts: Partial<MockGameStorageOptions> & { id: string }) {
   const storage = createMockGameStorage({
+    ...opts,
     phase: opts.phase ?? 2,
     expectedTurn: opts.expectedTurn ?? 1,
     shipsHitCount: opts.shipsHitCount ?? 0,
     totalShotsReceived: opts.totalShotsReceived ?? 0,
-    boardCells: opts.boardCells,
-    revealStatus: opts.revealStatus,
   });
 
   return {
