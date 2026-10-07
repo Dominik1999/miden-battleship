@@ -41,6 +41,14 @@ export const GRID_SIZE = 10;
 export const TOTAL_SHIP_CELLS = 17;
 /** Seconds a note must stay consumable before its sender may reclaim it (12 hours). */
 export const DEADLINE_DELTA_SECONDS = 43_200;
+/**
+ * The web client exposes no block header, so deadlines are derived from the wall clock, which
+ * testnet block timestamps track within seconds. The margins absorb clock skew: a deadline is
+ * padded so the contract's `>= block_timestamp + 12h` check holds, and a forfeit is only
+ * claimed once the wall clock is comfortably past the deadline.
+ */
+export const DEADLINE_MARGIN_SECONDS = 600;
+export const CLAIM_MARGIN_SECONDS = 300;
 /** A stake note becomes refundable to its staker this long after it was created (60 days). */
 export const STAKE_EXPIRY_DELTA_SECONDS = 60 * 24 * 3_600;
 

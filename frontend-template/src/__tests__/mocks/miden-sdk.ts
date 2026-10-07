@@ -126,6 +126,9 @@ export class NoteAssets {
   fungibleAssets() {
     return this.fungible;
   }
+  push(asset: FungibleAsset) {
+    this.fungible.push(asset);
+  }
 }
 
 export class NoteStorage {
@@ -204,7 +207,13 @@ export class Note {
 }
 
 export class NoteArray {
-  constructor(readonly notes: Note[]) {}
+  readonly notes: Note[];
+  constructor(notes: Note[] = []) {
+    this.notes = [...notes];
+  }
+  push(note: Note) {
+    this.notes.push(note);
+  }
 }
 export class NoteAndArgs {
   constructor(
@@ -304,6 +313,9 @@ export class AccountBuilder {
   }
   withNoAuthComponent() {
     return this;
+  }
+  buildWithoutSchemaCommitment() {
+    return this.build();
   }
   build() {
     const n = nextAccount++;

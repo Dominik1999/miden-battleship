@@ -6,6 +6,8 @@ import { useGameplaySync } from "@/hooks/useGameplaySync";
 import type { SessionActions } from "@/hooks/useGameSession";
 import { useSoundEffects } from "@/hooks/useSoundEffects";
 import { buildEnemyBoard } from "@/lib/gameplay";
+import { formatFeeBalance } from "@/lib/funding";
+import type { StakeStatus } from "./GameStatus";
 import { GameBoard } from "./GameBoard";
 import { GameStatus } from "./GameStatus";
 import "./GamePlay.css";
@@ -57,6 +59,15 @@ export function GamePlay({ myAccount, opponentAccount, playerRole, session, onNe
   const pendingShots = useMemo(() => new Set(shots.filter((s) => s.status === "pending").map((s) => `${s.row},${s.col}`)), [shots]);
   const enemyHits = useMemo(() => shots.filter((s) => s.status === "hit").length, [shots]);
   const interactive = game.myTurn && !game.busy && !gameOver;
+  const stake: StakeStatus | undefined =
+    game.stake.amount > 0n
+      ? {
+          amountLabel: formatFeeBalance(game.stake.amount),
+          published: game.stake.published,
+          opponentLocked: game.stake.opponentAmount !== null && game.stake.opponentAmount >= game.stake.amount,
+          claimed: game.stake.claimed,
+        }
+      : undefined;
 
   if (!myBoard) {
     return <div className="game-loading">Loading boards...</div>;
@@ -65,17 +76,17 @@ export function GamePlay({ myAccount, opponentAccount, playerRole, session, onNe
   return (
     <div className="game-play">
       <GameStatus
-        myState={game.myState}
+        myState={game.myState ? { phase: game.myState.phase, shipsHitCount: game.myState.shipsHitCount } : null}
         enemyHits={enemyHits}
         outcome={game.outcome}
         isMyTurn={game.myTurn}
         isSyncing={game.busy}
-        feeBalance={game.feeBalance}
+        feeBalance={game.feeBalance === null ? null : formatFeeBalance(game.feeBalance)}
         waitingDeadline={game.waitingDeadline}
         blockTime={game.blockTime}
         canClaimForfeit={game.canClaimForfeit}
         onClaimForfeit={() => void game.claimForfeit()}
-        stake={game.stake}
+        stake={stake}
         playerRole={playerRole}
       />
 

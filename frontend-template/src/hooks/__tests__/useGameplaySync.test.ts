@@ -25,6 +25,8 @@ const game = vi.hoisted(() => ({
   reclaimNote: vi.fn<Fn<Promise<unknown>>>(async () => ({})),
   myShotNote: vi.fn<Fn<Promise<unknown>>>(async () => ({ mine: true })),
   claimNotes: vi.fn<Fn<Promise<string>>>(async () => "0xtx"),
+  fundFromFaucet: vi.fn<Fn<Promise<bigint>>>(async () => 9_000n),
+  parseHandshakeStorage: vi.fn<Fn<{ wallet: { toString(): string } }>>(() => ({ wallet: idLike("mtst1oppwallet") })),
 }));
 vi.mock("@/lib/game", () => game);
 vi.mock("@/lib/funding", () => ({ claimFaucetTokens: vi.fn(), shouldTopUp: () => false }));
@@ -174,6 +176,17 @@ describe("useGameplaySync", () => {
     const lost = renderHook(() => useGameplaySync({ myAddress: ME, opponentAddress: OPP, session: makeSession(), enabled: true }));
     await waitFor(() => expect(lost.result.current.outcome).toBe("lost"));
     expect(game.claimNotes).not.toHaveBeenCalled();
+  });
+
+  it("the challenger stakes from the accept note's wallet before its first move, topping the wallet up when short", async () => {
+    mockAccount({ phase: PHASE_CHALLENGED, role: 0 });
+    game.pendingNotesFor.mockImplementation(async (...[, address]: unknown[]) => (address === ME ? [note("accept")] : []));
+    game.feeBalance.mockResolvedValue(1_055n);
+    const session = makeSession({ stakeAmount: "2000" });
+    renderHook(() => useGameplaySync({ myAddress: ME, opponentAddress: OPP, session, enabled: true }));
+    await waitFor(() => expect(game.publishStake).toHaveBeenCalledTimes(1));
+    expect(game.fundFromFaucet).toHaveBeenCalledWith(expect.anything(), "mtst1wallet");
+    expect(session.current.myStakeNoteId).toBe("0xstake");
   });
 
   it("with a stake, the first shot waits for the opponent's matching stake note", async () => {

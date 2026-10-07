@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AccountId, Felt, type Note, NoteFilter, NoteFilterTypes, Note as SdkNote } from "@miden-sdk/miden-sdk";
 import { useAccount } from "@miden-sdk/react";
-import { AUTO_SYNC_INTERVAL_MS, FAUCET_CLAIM_AMOUNT, FAUCET_CLAIM_COOLDOWN_MS, FEE_TOP_UP_THRESHOLD, MIDEN_FAUCET_URL, STAKE_EXPIRY_DELTA_SECONDS } from "@/config";
+import { AUTO_SYNC_INTERVAL_MS, CLAIM_MARGIN_SECONDS, FAUCET_CLAIM_AMOUNT, FAUCET_CLAIM_COOLDOWN_MS, FEE_TOP_UP_THRESHOLD, MIDEN_FAUCET_URL, STAKE_EXPIRY_DELTA_SECONDS } from "@/config";
 import {
   blockTimestamp,
   classifyNote,
   claimNotes,
   consumeNotes,
   feeBalance,
+  fundFromFaucet,
   myShotNote,
+  parseHandshakeStorage,
   parseResultStorage,
   parseShotStorage,
   parseStakeNote,
@@ -32,6 +34,11 @@ import { OUTCOME_LOST, OUTCOME_WON, OUTCOME_WON_BY_FORFEIT, PHASE_ACTIVE, PHASE_
 
 const log = (msg: string, ...args: unknown[]) =>
   console.log(`%c[GameplaySync] ${msg}`, "color: #0af; font-weight: bold", ...args);
+
+/** Fee headroom the wallet keeps beyond the stake (a few transactions). */
+const STAKE_FEE_RESERVE = 500n;
+/** How long a click waits for a running sync tick before it is reported as dropped. */
+const ACTION_WAIT_MS = 30_000;
 
 export type Outcome = "open" | "won" | "lost" | "won-by-forfeit";
 
@@ -190,22 +197,39 @@ export function useGameplaySync({ myAddress, opponentAddress, session, enabled }
     [myAddress, opponentAddress, patch],
   );
 
-  /** Stake bookkeeping: publish mine after the handshake, look for the opponent's at my wallet. */
+  /**
+   * Stake bookkeeping: publish mine as soon as the opponent's wallet is known (from my account
+   * after the handshake, or from the pending accept note for the challenger's first move),
+   * topping the wallet up from the faucet first when it cannot cover the stake; then look for
+   * the opponent's stake note at my wallet.
+   */
   const syncStakes = useCallback(
-    async (ctx: GameContext, state: GameState): Promise<{ opponentAmount: bigint | null; opponentNote: Note | null }> => {
+    async (ctx: GameContext, state: GameState, pending: PendingNotes): Promise<{ opponentAmount: bigint | null; opponentNote: Note | null }> => {
       const s = sessionRef.current.session;
       if (!s) return { opponentAmount: null, opponentNote: null };
       const amount = BigInt(s.stakeAmount);
       if (amount <= 0n) return { opponentAmount: null, opponentNote: null };
       const myGame = AccountId.fromBech32(myAddress);
-      if (!s.myStakeNoteId && state.phase >= PHASE_ACTIVE && state.opponentWallet) {
-        const [p, q] = state.opponentWallet;
-        const oppWallet = AccountId.fromPrefixSuffix(new Felt(p), new Felt(q));
-        log(`Publishing my stake of ${amount} base units`);
-        const expiry = (await blockTimestamp(ctx)) + STAKE_EXPIRY_DELTA_SECONDS;
-        const note = await publishStake(ctx, { myWallet: AccountId.fromBech32(s.myWallet), myGame, oppWallet, oppGame: AccountId.fromBech32(opponentAddress) }, amount, expiry);
-        sessionRef.current.update({ myStakeNoteId: note.id().toString() });
-        patch((v) => ({ stake: { ...v.stake, published: true } }));
+      if (!s.myStakeNoteId) {
+        let oppWallet: AccountId | null = null;
+        if (state.opponentWallet) {
+          const [p, q] = state.opponentWallet;
+          oppWallet = AccountId.fromPrefixSuffix(new Felt(p), new Felt(q));
+        } else if (pending.accept) {
+          oppWallet = parseHandshakeStorage(pending.accept).wallet;
+        }
+        if (oppWallet) {
+          const balance = await feeBalance(ctx, s.myWallet);
+          if (balance < amount + STAKE_FEE_RESERVE) {
+            log(`Wallet balance ${balance} cannot cover the stake of ${amount}: claiming from the faucet`);
+            await fundFromFaucet(ctx, s.myWallet);
+          }
+          log(`Publishing my stake of ${amount} base units`);
+          const expiry = (await blockTimestamp(ctx)) + STAKE_EXPIRY_DELTA_SECONDS;
+          const note = await publishStake(ctx, { myWallet: AccountId.fromBech32(s.myWallet), myGame, oppWallet, oppGame: AccountId.fromBech32(opponentAddress) }, amount, expiry);
+          sessionRef.current.update({ myStakeNoteId: note.id().toString() });
+          patch((v) => ({ stake: { ...v.stake, published: true } }));
+        }
       }
       const feeFaucet = await ctx.client.feeFaucetId();
       for (const record of await pendingNotesFor(ctx, s.myWallet)) {
@@ -306,7 +330,7 @@ export function useGameplaySync({ myAddress, opponentAddress, session, enabled }
       const outcome = outcomeOf(state);
       patch({ outcome });
       if (outcome !== "open") {
-        const { opponentAmount, opponentNote } = await syncStakes(ctx, state);
+        const { opponentAmount, opponentNote } = await syncStakes(ctx, state, pending);
         patch((v) => ({ stake: { ...v.stake, opponentAmount, published: !!sessionRef.current.session?.myStakeNoteId }, myTurn: false, waitingDeadline: null, canClaimForfeit: false }));
         if (outcome !== "lost") await claimPrize(ctx, opponentNote);
         return false;
@@ -328,7 +352,7 @@ export function useGameplaySync({ myAddress, opponentAddress, session, enabled }
       }
 
       // 5. Stakes gate the first shot: both notes must be in and match.
-      const { opponentAmount } = await syncStakes(ctx, state);
+      const { opponentAmount } = await syncStakes(ctx, state, pending);
       const stakeAmount = BigInt(sessionRef.current.session?.stakeAmount ?? "0");
       const stakesReady = stakeAmount === 0n || (opponentAmount !== null && opponentAmount >= stakeAmount);
       patch((v) => ({ stake: { ...v.stake, opponentAmount, published: !!sessionRef.current.session?.myStakeNoteId } }));
@@ -344,7 +368,7 @@ export function useGameplaySync({ myAddress, opponentAddress, session, enabled }
       const deadline = sessionRef.current.session?.pendingDeadline ?? null;
       const waiting = state.phase === PHASE_ACTIVE && state.shotsFired > 0 ? deadline : null;
       const now = waiting ? await blockTimestamp(ctx) : null;
-      patch({ myTurn: false, waitingDeadline: waiting, blockTime: now, canClaimForfeit: waiting !== null && now !== null && now > waiting });
+      patch({ myTurn: false, waitingDeadline: waiting, blockTime: now, canClaimForfeit: waiting !== null && now !== null && now > waiting + CLAIM_MARGIN_SECONDS });
       return false;
     },
     [myAddress, patch, readPending, syncStakes, claimPrize, playMove],
@@ -381,10 +405,17 @@ export function useGameplaySync({ myAddress, opponentAddress, session, enabled }
     };
   }, [enabled, myAddress, step, patch]);
 
-  /** Runs an exclusive action while the sync loop stays out of the way. */
+  /** Runs an exclusive action once the sync loop's current tick is over (a click must not be dropped). */
   const exclusiveAction = useCallback(
     async (label: string, action: (ctx: GameContext) => Promise<void>): Promise<boolean> => {
-      if (busyRef.current) return false;
+      const giveUp = Date.now() + ACTION_WAIT_MS;
+      while (busyRef.current) {
+        if (Date.now() > giveUp) {
+          patch({ lastError: `${label}: the game is still syncing, try again` });
+          return false;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
       busyRef.current = true;
       patch({ busy: true, lastError: null, myTurn: false });
       const { context, runExclusive } = contextRef.current;

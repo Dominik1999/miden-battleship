@@ -20,9 +20,9 @@ import {
   Word,
   type AccountComponent,
   type NoteScript,
+  TransactionRequestBuilder,
   type TransactionProver,
   type TransactionRequest,
-  type TransactionRequestBuilder,
   type TransactionScript,
 } from "@miden-sdk/miden-sdk";
 import { packBoard } from "@/lib/board";
@@ -74,6 +74,11 @@ export function addressFromValues(prefix: bigint, suffix: bigint): string {
 
 export function addressOf(id: AccountId): string {
   return Address.fromAccountId(id).toBech32(NetworkId.testnet());
+}
+
+/** A fresh handle for the same account id (wasm-bindgen consumes handles passed by value). */
+export function cloneId(id: AccountId): AccountId {
+  return AccountId.fromHex(id.toString());
 }
 
 // ---------------------------------------------------------------------------
@@ -173,7 +178,8 @@ export function buildNote(
   assets: NoteAssets = new NoteAssets(),
 ): Note {
   const recipient = new NoteRecipient(toWord(serial), noteScript, new NoteStorage(new FeltArray(felts(storage))));
-  const metadata = new NoteMetadata(sender, NoteType.Public, NoteTag.withAccountTarget(target));
+  // NoteTag/NoteMetadata consume the id handles they receive: hand them copies so callers keep theirs.
+  const metadata = new NoteMetadata(cloneId(sender), NoteType.Public, NoteTag.withAccountTarget(cloneId(target)));
   return new Note(assets, metadata, recipient);
 }
 
@@ -207,8 +213,13 @@ export function expectedForfeitNote(script: NoteScript, claimant: AccountId, own
 
 /** A stake note from `myWallet` holding `amount` of the fee asset, tagged for the opponent's wallet. */
 export function buildStakeNote(script: NoteScript, parties: StakeParties, expiry: number, feeFaucet: AccountId, amount: bigint): Note {
-  const assets = new NoteAssets([new FungibleAsset(feeFaucet, amount)]);
-  return buildNote(script, stakeStorage(parties, expiry), parties.oppWallet, parties.myWallet, randomValues(), assets);
+  // Push rather than pass an array: wasm-bindgen reads array handles unreliably (see the agentic-kb note on reused Felt handles).
+  const assets = new NoteAssets();
+  assets.push(new FungibleAsset(feeFaucet, amount));
+  const note = buildNote(script, stakeStorage(parties, expiry), parties.oppWallet, parties.myWallet, randomValues(), assets);
+  const carried = note.assets().fungibleAssets();
+  log(`Stake note carries ${carried.map((a) => `${a.amount()} of ${a.faucetId().toString()}`).join(", ")}`);
+  return note;
 }
 
 /**
@@ -235,8 +246,11 @@ export async function submitRequest(client: TxClient, address: string, request: 
  * is paid from the account's vault (fee-aware request builder).
  */
 export async function submitNoteDirect(notes: Note[], address: string, client: TxClient, prover?: TransactionProver | null): Promise<string> {
-  const builder = await client.feeAwareTransactionRequestBuilder(AccountId.fromBech32(address));
-  const request = builder.withOwnOutputNotes(new NoteArray(notes)).build();
+  // The plain builder, as in the Rust helpers: the client adds the fee conversion itself. The
+  // NoteArray is filled with push so the callers keep valid note handles.
+  const ownOutputs = new NoteArray();
+  for (const note of notes) ownOutputs.push(note);
+  const request = new TransactionRequestBuilder().withOwnOutputNotes(ownOutputs).build();
   log(`Submitting ${notes.length} note(s) from ${address}...`);
   const txId = await submitRequest(client, address, request, prover);
   log(`${notes.length} note(s) submitted — tx ${txId}`);
@@ -265,7 +279,7 @@ export async function createGameAccount(client: AccountClient, component: Accoun
     .withComponent(component)
     .withBasicWalletComponent()
     .withNoAuthComponent()
-    .build();
+    .buildWithoutSchemaCommitment();
   // Read the address and seed before handing the account handle to the client.
   const address = addressOf(account.id());
   const seedValues = feltValues(seed.toFelts());
@@ -284,7 +298,7 @@ export async function createLocalWallet(client: AccountClient): Promise<string> 
     .storageMode(AccountStorageMode.public())
     .withBasicWalletComponent()
     .withNoAuthComponent()
-    .build();
+    .buildWithoutSchemaCommitment();
   const address = addressOf(account.id());
   await client.newAccount(account, false);
   return address;

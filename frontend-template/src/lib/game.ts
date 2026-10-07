@@ -30,6 +30,7 @@ import {
 } from "@miden-sdk/miden-sdk";
 import {
   DEADLINE_DELTA_SECONDS,
+  DEADLINE_MARGIN_SECONDS,
   FAUCET_CLAIM_AMOUNT,
   SLOT_GAME_ID,
   SLOT_OPPONENT,
@@ -96,8 +97,9 @@ export interface GameClient extends TxClient {
   getAccount(accountId: AccountId): Promise<Account | undefined>;
   getTransactions(filter: TransactionFilter): Promise<{ id(): TransactionId; transactionStatus(): { isCommitted(): boolean; isDiscarded(): boolean } }[]>;
   feeFaucetId(): Promise<AccountId>;
-  getSyncHeight(): Promise<number>;
-  getBlockHeaderByNumber(blockNum?: number | null): Promise<{ timestamp(): number }>;
+  /** Optional: not on the react provider's client wrapper. */
+  getSyncHeight?(): Promise<number>;
+  getBlockHeaderByNumber?(blockNum?: number | null): Promise<{ timestamp(): number }>;
   newAccount(account: unknown, overwrite: boolean): Promise<void>;
 }
 
@@ -147,16 +149,27 @@ export async function sync(ctx: GameContext): Promise<void> {
   }
 }
 
-/** Timestamp (seconds) of the latest synced block: the reference block of the next transaction. */
+/**
+ * Timestamp (seconds) of the reference block of the next transaction. The client wrapper of
+ * the web SDK exposes no block header, so the wall clock stands in (testnet block timestamps
+ * follow it within seconds); a client that does expose `getBlockHeaderByNumber` is used instead.
+ */
 export async function blockTimestamp(ctx: GameContext): Promise<number> {
-  const height = await ctx.client.getSyncHeight();
-  const header = await ctx.client.getBlockHeaderByNumber(height);
-  return header.timestamp();
+  const client = ctx.client as Partial<GameClient>;
+  if (typeof client.getBlockHeaderByNumber === "function" && typeof client.getSyncHeight === "function") {
+    try {
+      const header = await client.getBlockHeaderByNumber(await client.getSyncHeight());
+      return header.timestamp();
+    } catch {
+      // fall back to the wall clock
+    }
+  }
+  return Math.floor(Date.now() / 1000);
 }
 
-/** A deadline 12 hours after the latest synced block. */
+/** A deadline 12 hours after now, padded so the contract's check against the reference block holds. */
 export async function deadlineFromNow(ctx: GameContext): Promise<number> {
-  return (await blockTimestamp(ctx)) + DEADLINE_DELTA_SECONDS;
+  return (await blockTimestamp(ctx)) + DEADLINE_DELTA_SECONDS + DEADLINE_MARGIN_SECONDS;
 }
 
 // ---------------------------------------------------------------------------
@@ -406,8 +419,8 @@ export async function myResultNote(ctx: GameContext, me: string, shooter: string
 /** The wallet publishes a stake note of `amount` fee-asset units naming the opponent. */
 export async function publishStake(ctx: GameContext, parties: StakeParties, amount: bigint, expiry: number): Promise<Note> {
   const feeFaucet = await ctx.client.feeFaucetId();
-  const note = buildStakeNote(await ctx.compiler.noteScript("stake"), parties, expiry, feeFaucet, amount);
   const from = addressOf(parties.myWallet);
+  const note = buildStakeNote(await ctx.compiler.noteScript("stake"), parties, expiry, feeFaucet, amount);
   const txId = await submitNoteDirect([note], from, ctx.client, ctx.prover);
   await waitForCommit(ctx, txId);
   return note;

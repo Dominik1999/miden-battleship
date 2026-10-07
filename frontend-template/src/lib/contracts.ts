@@ -191,7 +191,9 @@ export class ContractCompiler {
       .withComponent(placeholder)
       .withBasicWalletComponent()
       .withNoAuthComponent()
-      .build();
+      // Not `build()`: that merges a storage-schema component the Rust `AccountBuilder` does not,
+      // and the handshake pins the initial storage commitment, so both builders must agree.
+      .buildWithoutSchemaCommitment();
     const isc = account
       .storage()
       .commitment()

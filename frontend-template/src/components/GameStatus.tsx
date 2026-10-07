@@ -1,26 +1,40 @@
-import type { GameState, PlayerRole } from "@/types/game";
+import type { GamePhase, PlayerRole } from "@/types/game";
 import { PHASE_ACTIVE, PHASE_CHALLENGED } from "@/types/game";
 import { TOTAL_SHIP_CELLS } from "@/config";
-import { formatFeeBalance } from "@/lib/funding";
 import { formatCountdown } from "@/lib/gameplay";
-import type { Outcome, StakeView } from "@/hooks/useGameplaySync";
+import type { Outcome } from "@/hooks/useGameplaySync";
 import "./GameStatus.css";
 
+/** The slice of the game state the status bar shows (plain numbers only: React's dev tooling cannot serialize bigint props). */
+export interface StatusState {
+  phase: GamePhase;
+  shipsHitCount: number;
+}
+
 interface GameStatusProps {
-  myState: GameState | null;
+  myState: StatusState | null;
   /** Enemy ship cells I have hit so far (from result notes). */
   enemyHits: number;
   outcome: Outcome;
   isMyTurn: boolean;
   isSyncing: boolean;
-  feeBalance?: bigint | null;
+  /** Formatted fee balance of my game account. */
+  feeBalance?: string | null;
   /** Block timestamp after which the opponent forfeits, while I wait. */
   waitingDeadline?: number | null;
   blockTime?: number | null;
   canClaimForfeit?: boolean;
   onClaimForfeit?: () => void;
-  stake?: StakeView;
+  stake?: StakeStatus;
   playerRole?: PlayerRole;
+}
+
+/** Stake status as displayed (amounts pre-formatted: React's dev tooling cannot serialize bigint props). */
+export interface StakeStatus {
+  amountLabel: string;
+  published: boolean;
+  opponentLocked: boolean;
+  claimed: boolean;
 }
 
 const OUTCOME_LABELS: Record<Exclude<Outcome, "open">, { text: string; className: string }> = {
@@ -49,7 +63,7 @@ export function GameStatus({
 
   const myShipsRemaining = TOTAL_SHIP_CELLS - myState.shipsHitCount;
   const opponentShipsRemaining = TOTAL_SHIP_CELLS - enemyHits;
-  const stakesPending = stake && stake.amount > 0n && (!stake.published || stake.opponentAmount === null || stake.opponentAmount < stake.amount);
+  const stakesPending = stake !== undefined && (!stake.published || !stake.opponentLocked);
   const countdown = waitingDeadline && blockTime ? formatCountdown(waitingDeadline, blockTime) : null;
 
   let message: { text: string; className: string };
@@ -85,13 +99,19 @@ export function GameStatus({
         </span>
         {feeBalance !== undefined && (
           <span className="stat">
-            Fees: <strong>{formatFeeBalance(feeBalance)}</strong>
+            Fees: <strong>{feeBalance ?? "…"}</strong>
           </span>
         )}
-        {stake && stake.amount > 0n && (
+        {stake && (
           <span className="stat">
-            Stake: <strong>{formatFeeBalance(stake.amount)}</strong> each
-            {stake.claimed ? " — prize claimed" : stakesPending ? ` (yours ${stake.published ? "locked" : "pending"}, opponent's ${stake.opponentAmount === null ? "pending" : "locked"})` : " — both locked"}
+            Stake: <strong>{stake.amountLabel}</strong> each
+            {outcome === "lost"
+              ? " — paid to the winner"
+              : stake.claimed
+                ? " — prize claimed"
+                : stakesPending
+                  ? ` (yours ${stake.published ? "locked" : "pending"}, opponent's ${stake.opponentLocked ? "locked" : "pending"})`
+                  : " — both locked"}
           </span>
         )}
       </div>

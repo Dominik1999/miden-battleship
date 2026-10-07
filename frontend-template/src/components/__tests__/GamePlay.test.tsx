@@ -120,7 +120,7 @@ describe("GamePlay", () => {
   });
 
   it("gates the first shot on both stakes being locked", () => {
-    mockUseGameplaySync.mockReturnValue({ ...idleView, stake: { amount: 2000n, published: true, opponentAmount: null, claimed: false } });
+    mockUseGameplaySync.mockReturnValue({ ...idleView, stake: { amount: 2000n, published: true, opponentAmount: 1000n, claimed: false } });
     renderPlay(sessionWith([], "2000"));
     expect(screen.getByText(/Waiting for both stakes/)).toBeInTheDocument();
     expect(screen.getByText(/opponent's pending/)).toBeInTheDocument();

@@ -10,11 +10,12 @@ import { AccountId, Felt, NoteScript, FungibleAsset, makeTestNote, makeTestRecor
 import { createMockGameAccount } from "@/__tests__/fixtures/battleship";
 import { idValues } from "@/lib/notes";
 import { PHASE_ACTIVE, PHASE_CHALLENGED, ROLE_ACCEPTOR, ROLE_CHALLENGER } from "@/types/game";
-import { DEADLINE_DELTA_SECONDS } from "@/config";
+import { DEADLINE_DELTA_SECONDS, DEADLINE_MARGIN_SECONDS } from "@/config";
 const asNote = (n: unknown) => n as never;
 const asId = (id: unknown) => id as never;
 
 import {
+  blockTimestamp,
   classifyNote,
   nextFireTurn,
   parseHandshakeStorage,
@@ -188,9 +189,15 @@ describe("transactions", () => {
     const { ctx } = makeContext({ getAccount: vi.fn(async () => account) } as never);
     const plan = await planShot(ctx, ME, OPP, 4, 5);
     expect(plan.turn).toBe(6);
-    expect(plan.deadline).toBe(1_000_000 + DEADLINE_DELTA_SECONDS);
+    expect(plan.deadline).toBe(1_000_000 + DEADLINE_DELTA_SECONDS + DEADLINE_MARGIN_SECONDS);
     expect(plan.args).toEqual([4n, 5n, BigInt(plan.deadline), 0n]);
     expect(plan.note.recipient().storage().items().map((f) => f.asInt())).toEqual([4n, 5n, 6n, BigInt(plan.deadline)]);
+  });
+
+  it("blockTimestamp falls back to the wall clock when the client exposes no block header", async () => {
+    const { ctx } = makeContext({ getBlockHeaderByNumber: undefined, getSyncHeight: undefined } as never);
+    const before = Math.floor(Date.now() / 1000);
+    expect(await blockTimestamp(ctx)).toBeGreaterThanOrEqual(before);
   });
 
   it("predictShot mirrors the contract: ship cells hit, 17th hit ends the game", () => {
