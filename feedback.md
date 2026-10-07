@@ -23,8 +23,9 @@ faucet-funded NoAuth game accounts.
 
 - **The CLAUDE.md workflow assumed `miden-node bundled`,** which no longer exists in 0.17; the gate had
   to become a testnet run. The `local-node-validation` skill described the old binary.
-- **The web SDK exposes no Poseidon2 hash,** so the setup script's advice-payload preimage check could
-  not be satisfied from the browser; the script now takes an arbitrary advice-map key.
+- **I missed `Poseidon2.hashElements` in the web SDK** (a grep for "hash" does not find the class), so the
+  setup script's advice-payload preimage check was dropped in favour of an arbitrary advice-map key; it
+  can be restored.
 - **wasm-bindgen handle consumption is silent and mislabelled:** reusing a `Felt` gives
   `array contains a value of the wrong type`, nothing points at the moved handle. Keeping values as
   `bigint` and minting handles per call is the only safe pattern.
