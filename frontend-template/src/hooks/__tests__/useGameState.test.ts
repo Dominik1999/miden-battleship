@@ -5,8 +5,9 @@ vi.mock("@miden-sdk/react", () => import("@/__tests__/mocks/miden-sdk-react"));
 vi.mock("@miden-sdk/miden-sdk", () => import("@/__tests__/mocks/miden-sdk"));
 
 import { useAccount } from "@miden-sdk/react";
-import { readGameState, useGameState } from "../useGameState";
-import { createMockGameAccount, createMockGameStorage } from "@/__tests__/fixtures/battleship";
+import { useGameState } from "../useGameState";
+import { createMockGameAccount } from "@/__tests__/fixtures/battleship";
+import { OUTCOME_LOST, PHASE_COMPLETE, ROLE_CHALLENGER } from "@/types/game";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyAccount = any;
@@ -23,17 +24,11 @@ describe("useGameState", () => {
     expect(result.current.isLoading).toBe(true);
   });
 
-  it("parses game_config, opponent and reveal_status storage into GameState", () => {
-    const mockAccount = createMockGameAccount({ id: "mtst1test", phase: 3, expectedTurn: 5, shipsHitCount: 3, totalShotsReceived: 7, revealStatus: [1, 0] });
+  it("parses the account storage into GameState", () => {
+    const mockAccount = createMockGameAccount({ id: "mtst1test", phase: PHASE_COMPLETE, expectedTurn: 5, shipsHitCount: 17, totalShotsReceived: 20, shotsFired: 9, resultsProcessed: 9, role: ROLE_CHALLENGER, outcome: OUTCOME_LOST });
     vi.mocked(useAccount).mockReturnValue({ account: mockAccount as AnyAccount, assets: [], isLoading: false, error: null, refetch: vi.fn(), getBalance: vi.fn(() => 0n) });
     const { result } = renderHook(() => useGameState("mtst1test"));
-    expect(result.current.gameState).toEqual({ phase: 3, expectedTurn: 5, shipsHitCount: 3, totalShotsReceived: 7, myRevealed: 1, opponentVerified: 0 });
+    expect(result.current.gameState).toMatchObject({ phase: PHASE_COMPLETE, shipsHitCount: 17, totalShotsReceived: 20, shotsFired: 9, resultsProcessed: 9, role: ROLE_CHALLENGER, outcome: OUTCOME_LOST });
     expect(result.current.isLoading).toBe(false);
-  });
-
-  it("readGameState defaults the reveal flags to 0 when the slot is missing", () => {
-    const storage = createMockGameStorage({ phase: 2, expectedTurn: 1, shipsHitCount: 0, totalShotsReceived: 0 });
-    expect(readGameState(storage)?.myRevealed).toBe(0);
-    expect(readGameState({ getItem: () => undefined })).toBeNull();
   });
 });

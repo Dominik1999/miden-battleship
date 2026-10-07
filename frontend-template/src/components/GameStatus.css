@@ -54,3 +54,7 @@
   0%, 100% { opacity: 0.4; }
   50% { opacity: 1; }
 }
+
+.forfeit-btn {
+  margin: 8px auto;
+}

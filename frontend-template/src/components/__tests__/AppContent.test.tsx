@@ -14,13 +14,12 @@ vi.mock("@/components/LobbyScreen", () => ({
     onStartGame,
     onJoinGame,
   }: {
-    walletConnected: boolean;
-    onStartGame: () => void;
-    onJoinGame: (id: string) => void;
+    onStartGame: (stake: bigint) => void;
+    onJoinGame: (id: string, stake: bigint) => void;
   }) => (
     <div data-testid="lobby">
-      <button onClick={onStartGame}>Start Game</button>
-      <button onClick={() => onJoinGame("mtst1test")}>Join Game</button>
+      <button onClick={() => onStartGame(0n)}>Start Game</button>
+      <button onClick={() => onJoinGame("mtst1test", 0n)}>Join Game</button>
     </div>
   ),
 }));
@@ -36,9 +35,9 @@ vi.mock("@/hooks/useStartGame", () => ({
     stage: "idle",
     status: "",
     error: null,
+    resume: vi.fn(),
     gameAccountAddress: null,
     opponentAddress: null,
-    commitment: null,
   }),
 }));
 vi.mock("@/hooks/useJoinGame", () => ({
@@ -47,9 +46,9 @@ vi.mock("@/hooks/useJoinGame", () => ({
     stage: "idle",
     status: "",
     error: null,
+    resume: vi.fn(),
     gameAccountAddress: null,
     starterAddress: null,
-    commitment: null,
   }),
 }));
 

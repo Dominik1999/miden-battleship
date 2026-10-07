@@ -26,8 +26,7 @@ const JOINER_LABELS: Partial<Record<JoinStage, string>> = {
   "setting-up": "Setting up your board...",
   challenging: "Sending challenge to opponent...",
   waiting: "Waiting for opponent to accept...",
-  accepting: "Opponent accepted! Activating the game...",
-  ready: "Game ready!",
+  ready: "Opponent accepted! Fire the first shot.",
 };
 
 export function WaitingScreen({ gameId, isStarter, stage, status, error }: WaitingScreenProps) {

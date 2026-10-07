@@ -6,6 +6,7 @@ import { ShipPlacement } from "./ShipPlacement";
 import { LobbyScreen } from "./LobbyScreen";
 import { WaitingScreen } from "./WaitingScreen";
 import { GamePlay } from "./GamePlay";
+import { useGameSession } from "@/hooks/useGameSession";
 import { useStartGame } from "@/hooks/useStartGame";
 import { useJoinGame } from "@/hooks/useJoinGame";
 import "./AppContent.css";
@@ -14,19 +15,23 @@ type Screen = "lobby" | "placement" | "waiting" | "play";
 type FlowMode = "start" | "join" | null;
 
 function GameScreens() {
+  const session = useGameSession();
   const [screen, setScreen] = useState<Screen>("lobby");
   const [flowMode, setFlowMode] = useState<FlowMode>(null);
   const [joinTargetId, setJoinTargetId] = useState<string | null>(null);
+  const [stakeAmount, setStakeAmount] = useState<bigint>(0n);
 
-  const start = useStartGame();
-  const join = useJoinGame();
+  const start = useStartGame(session);
+  const join = useJoinGame(session);
 
-  const handleStartGame = useCallback(() => {
+  const handleStartGame = useCallback((stake: bigint) => {
+    setStakeAmount(stake);
     setFlowMode("start");
     setScreen("placement");
   }, []);
 
-  const handleJoinGame = useCallback((gameId: string) => {
+  const handleJoinGame = useCallback((gameId: string, stake: bigint) => {
+    setStakeAmount(stake);
     setFlowMode("join");
     setJoinTargetId(gameId);
     setScreen("placement");
@@ -36,13 +41,33 @@ function GameScreens() {
     async (cells: ShipCell[]) => {
       setScreen("waiting");
       if (flowMode === "start") {
-        await start.startGame(cells);
+        await start.startGame(cells, stakeAmount);
       } else if (flowMode === "join" && joinTargetId) {
-        await join.joinGame(joinTargetId, cells);
+        await join.joinGame(joinTargetId, cells, stakeAmount);
       }
     },
-    [flowMode, joinTargetId, start, join],
+    [flowMode, joinTargetId, stakeAmount, start, join],
   );
+
+  const handleResume = useCallback(() => {
+    const s = session.session;
+    if (!s) return;
+    setScreen("waiting");
+    if (s.role === "acceptor") {
+      setFlowMode("start");
+      start.resume(s);
+    } else {
+      setFlowMode("join");
+      setJoinTargetId(s.opponentAddress);
+      void join.resume(s);
+    }
+  }, [session.session, start, join]);
+
+  const handleNewGame = useCallback(() => {
+    session.clear();
+    setFlowMode(null);
+    setScreen("lobby");
+  }, [session]);
 
   useEffect(() => {
     if (flowMode === "start" && start.stage === "ready") setScreen("play");
@@ -55,10 +80,10 @@ function GameScreens() {
   // The joiner is the challenger (fires first); the starter is the acceptor.
   const gameConfig = (() => {
     if (flowMode === "start" && start.gameAccountAddress && start.opponentAddress) {
-      return { accountA: start.opponentAddress, accountB: start.gameAccountAddress, role: "acceptor" as const, commitment: start.commitment };
+      return { myAccount: start.gameAccountAddress, opponentAccount: start.opponentAddress, role: "acceptor" as const };
     }
     if (flowMode === "join" && join.gameAccountAddress && join.starterAddress) {
-      return { accountA: join.gameAccountAddress, accountB: join.starterAddress, role: "challenger" as const, commitment: join.commitment };
+      return { myAccount: join.gameAccountAddress, opponentAccount: join.starterAddress, role: "challenger" as const };
     }
     return null;
   })();
@@ -67,22 +92,16 @@ function GameScreens() {
 
   return (
     <>
-      {screen === "lobby" && <LobbyScreen onStartGame={handleStartGame} onJoinGame={handleJoinGame} />}
+      {screen === "lobby" && <LobbyScreen onStartGame={handleStartGame} onJoinGame={handleJoinGame} session={session.session} onResume={handleResume} onDiscard={handleNewGame} />}
 
       {screen === "placement" && <ShipPlacement onConfirm={handlePlacementConfirm} />}
 
       {screen === "waiting" && (
-        <WaitingScreen
-          gameId={flowMode === "start" ? start.gameAccountAddress : joinTargetId}
-          isStarter={flowMode === "start"}
-          stage={flow.stage}
-          status={flow.status}
-          error={flow.error}
-        />
+        <WaitingScreen gameId={flowMode === "start" ? start.gameAccountAddress : joinTargetId} isStarter={flowMode === "start"} stage={flow.stage} status={flow.status} error={flow.error} />
       )}
 
       {screen === "play" && gameConfig && (
-        <GamePlay accountA={gameConfig.accountA} accountB={gameConfig.accountB} playerRole={gameConfig.role} commitment={gameConfig.commitment} />
+        <GamePlay myAccount={gameConfig.myAccount} opponentAccount={gameConfig.opponentAccount} playerRole={gameConfig.role} session={session} onNewGame={handleNewGame} />
       )}
     </>
   );

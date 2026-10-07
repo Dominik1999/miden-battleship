@@ -1,51 +1,50 @@
 import { useState, useCallback, useEffect, useRef } from "react";
-import { AccountId, Address, NetworkId, type InputNoteRecord } from "@miden-sdk/miden-sdk";
+import { AccountId, type InputNoteRecord } from "@miden-sdk/miden-sdk";
 import { AUTO_SYNC_INTERVAL_MS } from "@/config";
 import {
   classifyNote,
-  consumeNote,
+  consumeNotes,
   createAndFundGameAccount,
-  handshakeStorageFor,
+  createAndFundWallet,
   hasSentNote,
   parseHandshakeStorage,
   pendingNotesFor,
-  publishGameNote,
-  randomValues,
+  publishHandshake,
   readGameIdentity,
   runSetup,
-  type FeltValues,
   sync,
 } from "@/lib/game";
+import { addressOf } from "@/lib/notes";
+import { stringsToValues, valuesToStrings, type GameSession } from "@/lib/session";
+import { readGameState } from "@/lib/state";
 import { useGameContext } from "@/hooks/useGameContext";
-import { readGameState } from "@/hooks/useGameState";
+import type { SessionActions } from "@/hooks/useGameSession";
 import { PHASE_ACTIVE, PHASE_CREATED, type ShipCell } from "@/types/game";
 
-export type StartStage =
-  | "idle"
-  | "preparing"
-  | "waiting-for-opponent"
-  | "completing"
-  | "ready"
-  | "error";
+export type StartStage = "idle" | "preparing" | "waiting-for-opponent" | "completing" | "ready" | "error";
 
 const log = (msg: string, ...args: unknown[]) =>
   console.log(`%c[StartGame] ${msg}`, "color: #fa0; font-weight: bold", ...args);
 
 /**
- * Starter flow: create + fund a game account, share its address, wait for a challenge note,
- * then set up the board (with the challenger's game id), accept the challenge and send the
+ * Starter flow: create + fund a private game account and a wallet, share the game account's
+ * address, wait for a challenge note, then set up the board (with the challenger's game id),
+ * accept the challenge (which verifies the challenger's seed and roots on-chain) and send the
  * accept note. In contract terms the starter is the acceptor: the joiner fires first.
+ *
+ * Every step is derived from on-chain state and the persisted session, so `resume()` after a
+ * reload continues where the flow stopped.
  */
-export function useStartGame() {
+export function useStartGame(sessionActions: SessionActions) {
   const [stage, setStage] = useState<StartStage>("idle");
   const [status, setStatus] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [gameAccountAddress, setGameAccountAddress] = useState<string | null>(null);
   const [opponentAddress, setOpponentAddress] = useState<string | null>(null);
-  const [commitment, setCommitment] = useState<FeltValues | null>(null);
 
   const { runExclusive, context } = useGameContext();
-  const boardRef = useRef<{ cells: ShipCell[]; commitment: FeltValues } | null>(null);
+  const sessionRef = useRef(sessionActions);
+  sessionRef.current = sessionActions;
   const busyRef = useRef(false);
 
   const fail = useCallback((err: unknown) => {
@@ -56,14 +55,30 @@ export function useStartGame() {
   }, []);
 
   const startGame = useCallback(
-    async (cells: ShipCell[]): Promise<string | null> => {
+    async (cells: ShipCell[], stakeAmount: bigint): Promise<string | null> => {
       setError(null);
       setStage("preparing");
       try {
-        const address = await runExclusive(() => createAndFundGameAccount(context(setStatus)));
-        const commit = randomValues();
-        boardRef.current = { cells, commitment: commit };
-        setCommitment(commit);
+        const ctx = context(setStatus);
+        const { address, seed } = await runExclusive(() => createAndFundGameAccount(ctx));
+        const wallet = await runExclusive(() => createAndFundWallet(ctx));
+        const session: GameSession = {
+          version: 1,
+          role: "acceptor",
+          myAddress: address,
+          mySeed: valuesToStrings(seed),
+          myWallet: wallet,
+          opponentAddress: null,
+          gameId: null,
+          cells,
+          stakeAmount: stakeAmount.toString(),
+          shots: [],
+          pendingDeadline: null,
+          myStakeNoteId: null,
+          claimed: false,
+          createdAt: Date.now(),
+        };
+        sessionRef.current.start(session);
         setGameAccountAddress(address);
         setStatus("Share your game account address with your opponent.");
         setStage("waiting-for-opponent");
@@ -76,9 +91,17 @@ export function useStartGame() {
     [runExclusive, context, fail],
   );
 
-  // Poll until the handshake is complete. Every step is derived from on-chain state so the
-  // flow survives interruptions: CHALLENGED/CREATED → wait for the challenge note, set up the
-  // board and accept it; ACTIVE → send the accept note unless it was already sent.
+  /** Continues a persisted starter session: the polling effect works out the next step. */
+  const resume = useCallback((session: GameSession) => {
+    setError(null);
+    setGameAccountAddress(session.myAddress);
+    setOpponentAddress(session.opponentAddress);
+    setStatus("Resuming your game...");
+    setStage("waiting-for-opponent");
+  }, []);
+
+  // Poll until the handshake is complete: CREATED/CHALLENGED → wait for the challenge note, set
+  // up the board and accept it; ACTIVE → send the accept note unless it was already sent.
   useEffect(() => {
     if ((stage !== "waiting-for-opponent" && stage !== "completing") || !gameAccountAddress) return;
     const address = gameAccountAddress;
@@ -94,6 +117,8 @@ export function useStartGame() {
           await sync(ctx);
           const account = await ctx.client.getAccount(me);
           if (!account) throw new Error("Game account not found in the local store");
+          const session = sessionRef.current.session;
+          if (!session) throw new Error("No game session");
           let phase = readGameState(account.storage())?.phase ?? PHASE_CREATED;
 
           if (phase < PHASE_ACTIVE) {
@@ -108,29 +133,26 @@ export function useStartGame() {
             }
             if (!challenge) return false;
             setStage("completing");
-            const board = boardRef.current;
-            if (!board) throw new Error("Board placement was lost");
             const note = challenge.toNote();
-            const { gameId, sender, commitment: theirCommitment } = parseHandshakeStorage(note);
-            log(`Challenge from ${sender.toString()}, game id [${gameId.join(", ")}], commitment [${theirCommitment.join(", ")}]`);
+            const { gameId, sender, wallet } = parseHandshakeStorage(note);
+            log(`Challenge from ${sender.toString()}, game id [${gameId.join(", ")}], wallet ${wallet.toString()}`);
             if (phase === PHASE_CREATED) {
               setStatus("Storing your board on-chain...");
-              await runSetup(ctx, address, gameId, sender, board.commitment, board.cells);
+              await runSetup(ctx, address, gameId, sender, AccountId.fromBech32(session.myWallet), session.cells);
             }
-            setStatus("Accepting the challenge...");
-            await consumeNote(ctx, address, note);
+            setStatus("Accepting the challenge (verifying the opponent's account)...");
+            await consumeNotes(ctx, address, [note]);
             phase = PHASE_ACTIVE;
           }
 
           const identity = readGameIdentity((await ctx.client.getAccount(me)) ?? account);
           if (!identity) throw new Error("Game account has no opponent after the handshake");
-          const opponent = Address.fromAccountId(identity.opponent).toBech32(NetworkId.testnet());
-          const board = boardRef.current;
-          if (!board) throw new Error("Board placement was lost");
+          const opponent = addressOf(identity.opponent);
+          sessionRef.current.update({ opponentAddress: opponent, gameId: valuesToStrings(identity.gameId) });
           if (!(await hasSentNote(ctx, "accept", opponent, identity.gameId))) {
             setStage("completing");
             setStatus("Sending the accept note...");
-            await publishGameNote(ctx, "accept", address, opponent, handshakeStorageFor(identity.gameId, me, board.commitment));
+            await publishHandshake(ctx, "accept", address, opponent, { gameId: identity.gameId, seed: stringsToValues(session.mySeed), wallet: session.myWallet });
           }
           return opponent;
         });
@@ -153,5 +175,5 @@ export function useStartGame() {
     };
   }, [stage, gameAccountAddress, runExclusive, context, fail]);
 
-  return { startGame, stage, status, error, gameAccountAddress, opponentAddress, commitment };
+  return { startGame, resume, stage, status, error, gameAccountAddress, opponentAddress };
 }
