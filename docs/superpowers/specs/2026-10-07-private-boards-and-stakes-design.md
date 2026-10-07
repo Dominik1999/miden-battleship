@@ -41,11 +41,13 @@ Two conditions make this trustworthy and are enforced on-chain:
    accept notes carry the sender's seed; `accept_challenge` and `receive_acceptance` recompute
    the ID from the seed and the known commitments and reject a mismatch. Clients also run this
    check before staking.
-2. **Prover trust.** Every game-account transaction carries the full private state as prover
-   input, so whoever proves it can read the board. Decision (pending review, see section 10):
-   the partner-operated remote prover is used by default and documented as trusted for board
-   confidentiality; the node, the opponent and the public never see a board. Local in-browser
-   proving is an opt-in "private mode" setting that costs about 3x per turn.
+2. **Prover trust (decided 2026-10-07).** Every game-account transaction carries the full
+   private state as prover input, so the prover operator can read the board and, because game
+   accounts stay `NoAuth`, could also execute transactions on them. The partner-operated remote
+   prover is trusted for both; the node, the opponent and the public never see a board and
+   cannot act on an account whose state they do not hold. Local in-browser proving remains an
+   opt-in "private mode" (about 3x slower per turn) for players who do not want to trust the
+   prover with their board.
 
 ## 4. Game protocol
 
@@ -161,8 +163,9 @@ acceptor's client can show it before accepting.
 
 ## 7. Frontend
 
-- Game accounts: `AccountType.Private`, ECDSA auth (`AuthSecretKey.ecdsaWithRNG`, key in the
-  SDK keystore), BasicWallet for receiving the fee top-up.
+- Game accounts: `AccountType.Private`, `NoAuth` (unchanged), BasicWallet for receiving the
+  fee top-up. The random account seed is the only secret needed to keep the account out of
+  anyone's reach except the prover; no key, no keystore.
 - Fee funding on mainnet: the wallet sends a USDCx P2ID note to the game account at creation
   (one of the two wallet signatures is combined with the stake: stake note + fee note in the
   same wallet transaction). Testnet keeps the faucet.
@@ -197,6 +200,9 @@ acceptor's client can show it before accepting.
   mitigation.
 - **Wallet capabilities.** The stake transaction is a custom note with assets created through
   the wallet adapter; confirm the partner wallet supports custom-script notes with assets.
+- **Prover trust.** The prover operator can read boards and, with `NoAuth`, execute moves on
+  any game account whose transactions it has proven. Accepted for the partner-run prover;
+  revisit (ECDSA on game accounts, or local proving) before opening to third-party provers.
 - **Prover time.** See section 10.
 
 ## 10. Spike: in-browser proving (measured 2026-10-07)
@@ -221,8 +227,9 @@ Conclusions:
 - Local proving costs roughly 8 to 17 s per transaction on this machine, about 3x the remote
   prover; a full turn (shooter's `process_result` + `fire_shot`, then the defender's
   `process_shot`) would take 30 to 40 s locally versus about 12 s remotely.
-- ECDSA adds a few seconds at most, so ECDSA auth on game accounts is affordable (decision:
-  ECDSA everywhere).
+- ECDSA would add a few seconds at most locally and nothing remotely; it was measured as the
+  option that keeps the prover operator read-only, and rejected for now in favour of trusting
+  the prover (game accounts stay `NoAuth`).
 - Recommendation: remote prover by default on mainnet, with the privacy caveat that the prover
   operator can read the boards; local proving as an opt-in private mode. The UI shows a
   proving indicator in both modes.
