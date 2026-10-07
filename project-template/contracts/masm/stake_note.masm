@@ -1,0 +1,148 @@
+use {NoteArgs} from miden::protocol::types
+use miden::protocol::account_id
+use miden::protocol::active_account
+use miden::protocol::active_note
+use miden::protocol::input_note
+use miden::protocol::tx
+use miden::standards::wallets::basic as basic_wallet
+
+# Stake note: a conditional P2ID created by a player's wallet. It holds the stake and names both
+# players' wallets and game accounts. It can be consumed by
+# - the opponent's wallet, when the same transaction also consumes a defeat note sent by the
+#   staker's game account or a forfeit note sent by the opponent's game account;
+# - the staker's wallet, when the same transaction also consumes a defeat note sent by the
+#   opponent's game account or a forfeit note sent by the staker's game account;
+# - the staker's wallet after the expiry timestamp (safety valve).
+# The defeat and forfeit script roots are filled in by the compiler.
+
+# CONSTANTS
+# =================================================================================================
+
+const STORAGE_PTR = 0
+
+# Note storage layout (9 items):
+# [my_wallet_prefix, my_wallet_suffix, my_game_prefix, my_game_suffix,
+#  opp_wallet_prefix, opp_wallet_suffix, opp_game_prefix, opp_game_suffix, expiry]
+const MY_WALLET_PREFIX_PTR = STORAGE_PTR
+const MY_WALLET_SUFFIX_PTR = STORAGE_PTR + 1
+const MY_GAME_PREFIX_PTR = STORAGE_PTR + 2
+const MY_GAME_SUFFIX_PTR = STORAGE_PTR + 3
+const OPP_WALLET_PREFIX_PTR = STORAGE_PTR + 4
+const OPP_WALLET_SUFFIX_PTR = STORAGE_PTR + 5
+const OPP_GAME_PREFIX_PTR = STORAGE_PTR + 6
+const OPP_GAME_SUFFIX_PTR = STORAGE_PTR + 7
+const EXPIRY_PTR = STORAGE_PTR + 8
+const NUM_STORAGE_ITEMS = 9
+
+# Scratch memory: proof flags and loop counters.
+const MY_GAME_DEFEATED_PTR = 16
+const OPP_GAME_DEFEATED_PTR = 17
+const MY_GAME_FORFEIT_PTR = 18
+const OPP_GAME_FORFEIT_PTR = 19
+const NOTE_INDEX_PTR = 20
+const NUM_NOTES_PTR = 21
+
+const DEFEAT_ROOT_0 = {{DEFEAT0}}
+const DEFEAT_ROOT_1 = {{DEFEAT1}}
+const DEFEAT_ROOT_2 = {{DEFEAT2}}
+const DEFEAT_ROOT_3 = {{DEFEAT3}}
+const FORFEIT_ROOT_0 = {{FORFEIT0}}
+const FORFEIT_ROOT_1 = {{FORFEIT1}}
+const FORFEIT_ROOT_2 = {{FORFEIT2}}
+const FORFEIT_ROOT_3 = {{FORFEIT3}}
+
+# ERRORS
+# =================================================================================================
+
+const ERR_STAKE_NOTE_WRONG_NUM_STORAGE_ITEMS = "stake note must carry exactly 9 storage items"
+const ERR_STAKE_NOT_CLAIMABLE = "stake note: the consuming wallet has no claim on this stake"
+
+# NOTE SCRIPT
+# =================================================================================================
+
+#! Moves the stake to the consuming wallet if it has a claim on it.
+#!
+#! Inputs:  [NOTE_ARGS, pad(12)]
+#! Outputs: [pad(16)]
+#!
+#! Invocation: dyncall
+@note_script
+pub proc main(args: NoteArgs)
+    dropw
+    push.NUM_STORAGE_ITEMS push.STORAGE_PTR exec.active_note::get_bounded_storage
+    eq.NUM_STORAGE_ITEMS assert.err=ERR_STAKE_NOTE_WRONG_NUM_STORAGE_ITEMS
+    # => [pad(16)]
+
+    exec.scan_input_notes
+    # => [pad(16)]
+
+    exec.active_account::get_id
+    # => [consumer_suffix, consumer_prefix, pad(16)]
+
+    dup.1 dup.1
+    mem_load.OPP_WALLET_PREFIX_PTR mem_load.OPP_WALLET_SUFFIX_PTR exec.account_id::eq
+    # => [is_opp_wallet, consumer_suffix, consumer_prefix, ...]
+
+    movdn.2
+    mem_load.MY_WALLET_PREFIX_PTR mem_load.MY_WALLET_SUFFIX_PTR exec.account_id::eq
+    # => [is_my_wallet, is_opp_wallet, ...]
+
+    # opponent's claim: my game lost, or the opponent's game reclaimed a note I did not answer
+    mem_load.MY_GAME_DEFEATED_PTR mem_load.OPP_GAME_FORFEIT_PTR or
+    dup.2 and
+    # => [opp_claim, is_my_wallet, is_opp_wallet, ...]
+
+    # my claim: the opponent's game lost, my game reclaimed a note, or the stake expired
+    mem_load.EXPIRY_PTR exec.tx::get_block_timestamp u32lt
+    mem_load.OPP_GAME_DEFEATED_PTR or
+    mem_load.MY_GAME_FORFEIT_PTR or
+    dup.2 and
+    # => [my_claim, opp_claim, is_my_wallet, is_opp_wallet, ...]
+
+    or assert.err=ERR_STAKE_NOT_CLAIMABLE
+    drop drop
+    # => [pad(16)]
+
+    exec.basic_wallet::move_note_assets_to_account
+    # => [pad(16)]
+end
+
+#! Sets the four proof flags from the senders and script roots of all input notes.
+#! Inputs: [] Outputs: []
+proc scan_input_notes()
+    push.0 mem_store.MY_GAME_DEFEATED_PTR
+    push.0 mem_store.OPP_GAME_DEFEATED_PTR
+    push.0 mem_store.MY_GAME_FORFEIT_PTR
+    push.0 mem_store.OPP_GAME_FORFEIT_PTR
+    push.0 mem_store.NOTE_INDEX_PTR
+    exec.tx::get_num_input_notes mem_store.NUM_NOTES_PTR
+
+    mem_load.NOTE_INDEX_PTR mem_load.NUM_NOTES_PTR u32lt
+    while.true
+        mem_load.NOTE_INDEX_PTR exec.input_note::get_script_root
+        # => [ROOT]
+        push.DEFEAT_ROOT_3 push.DEFEAT_ROOT_2 push.DEFEAT_ROOT_1 push.DEFEAT_ROOT_0
+        eqw movdn.8 dropw
+        # => [is_defeat, ROOT]
+        push.FORFEIT_ROOT_3 push.FORFEIT_ROOT_2 push.FORFEIT_ROOT_1 push.FORFEIT_ROOT_0
+        eqw movdn.8 dropw dropw
+        # => [is_forfeit, is_defeat]
+
+        mem_load.NOTE_INDEX_PTR exec.input_note::get_sender
+        # => [sender_suffix, sender_prefix, is_forfeit, is_defeat]
+        dup.1 dup.1 mem_load.MY_GAME_PREFIX_PTR mem_load.MY_GAME_SUFFIX_PTR exec.account_id::eq
+        # => [from_my_game, sender_suffix, sender_prefix, is_forfeit, is_defeat]
+        movdn.2 mem_load.OPP_GAME_PREFIX_PTR mem_load.OPP_GAME_SUFFIX_PTR exec.account_id::eq
+        # => [from_opp_game, from_my_game, is_forfeit, is_defeat]
+
+        dup.3 dup.2 and mem_load.MY_GAME_DEFEATED_PTR or mem_store.MY_GAME_DEFEATED_PTR
+        dup.3 dup.1 and mem_load.OPP_GAME_DEFEATED_PTR or mem_store.OPP_GAME_DEFEATED_PTR
+        dup.2 dup.2 and mem_load.MY_GAME_FORFEIT_PTR or mem_store.MY_GAME_FORFEIT_PTR
+        dup.2 dup.1 and mem_load.OPP_GAME_FORFEIT_PTR or mem_store.OPP_GAME_FORFEIT_PTR
+        drop drop drop drop
+        # => []
+
+        mem_load.NOTE_INDEX_PTR add.1 mem_store.NOTE_INDEX_PTR
+        mem_load.NOTE_INDEX_PTR mem_load.NUM_NOTES_PTR u32lt
+    end
+end

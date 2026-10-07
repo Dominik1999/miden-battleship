@@ -9,6 +9,7 @@ use miden_client::{
         AccountType, StorageMap, StorageMapKey, StorageSlot, StorageSlotName,
     },
     assembly::CodeBuilder,
+    asset::Asset,
     note::{
         Note, NoteAssets, NoteRecipient, NoteScript, NoteStorage, NoteTag, NoteType,
         PartialNoteMetadata,
@@ -105,6 +106,7 @@ pub const SHOT_NOTE_MASM: &str = include_str!("../../contracts/masm/shot_note.ma
 pub const RESULT_NOTE_MASM: &str = include_str!("../../contracts/masm/result_note.masm");
 pub const DEFEAT_NOTE_MASM: &str = include_str!("../../contracts/masm/defeat_note.masm");
 pub const FORFEIT_NOTE_MASM: &str = include_str!("../../contracts/masm/forfeit_note.masm");
+pub const STAKE_NOTE_MASM_TEMPLATE: &str = include_str!("../../contracts/masm/stake_note.masm");
 pub const SETUP_TX_MASM: &str = include_str!("../../contracts/masm/scripts/setup_tx.masm");
 pub const FIRE_TX_MASM: &str = include_str!("../../contracts/masm/scripts/fire_tx.masm");
 
@@ -160,6 +162,35 @@ pub fn compile_note_script(
         .map_err(|e| anyhow::anyhow!("failed to compile note script: {e}"))
 }
 
+/// The stake note source with the defeat and forfeit script roots filled in.
+pub fn stake_note_masm(defeat: Word, forfeit: Word) -> String {
+    let mut source = STAKE_NOTE_MASM_TEMPLATE.to_string();
+    for (i, felt) in defeat.iter().enumerate() {
+        source = source.replace(
+            &format!("{{{{DEFEAT{i}}}}}"),
+            &felt.as_canonical_u64().to_string(),
+        );
+    }
+    for (i, felt) in forfeit.iter().enumerate() {
+        source = source.replace(
+            &format!("{{{{FORFEIT{i}}}}}"),
+            &felt.as_canonical_u64().to_string(),
+        );
+    }
+    source
+}
+
+/// Compiles the stake note script (it does not call into the component).
+pub fn compile_stake_script(
+    builder: CodeBuilder,
+    defeat: Word,
+    forfeit: Word,
+) -> Result<NoteScript> {
+    builder
+        .compile_note_script(stake_note_masm(defeat, forfeit))
+        .map_err(|e| anyhow::anyhow!("failed to compile stake note script: {e}"))
+}
+
 /// Compiles a transaction script that `call`s into the battleship component.
 pub fn compile_tx_script(
     builder: CodeBuilder,
@@ -205,6 +236,7 @@ pub struct BattleshipScripts {
     pub result_note: NoteScript,
     pub defeat_note: NoteScript,
     pub forfeit_note: NoteScript,
+    pub stake_note: NoteScript,
 }
 
 impl BattleshipScripts {
@@ -225,6 +257,11 @@ impl BattleshipScripts {
         let result_note = note(RESULT_NOTE_MASM)?;
         let defeat_note = note(DEFEAT_NOTE_MASM)?;
         let forfeit_note = note(FORFEIT_NOTE_MASM)?;
+        let stake_note = compile_stake_script(
+            new_builder(),
+            Word::from(defeat_note.root()),
+            Word::from(forfeit_note.root()),
+        )?;
         let mut tx = |src| compile_tx_script(new_builder(), &component_code, src);
         let setup_tx = tx(SETUP_TX_MASM)?;
         let fire_tx = tx(FIRE_TX_MASM)?;
@@ -239,6 +276,7 @@ impl BattleshipScripts {
             result_note,
             defeat_note,
             forfeit_note,
+            stake_note,
         })
     }
 
@@ -476,6 +514,50 @@ pub fn result_storage(
         felt(result.encode()),
         felt(deadline),
     ]
+}
+
+/// Stake note storage: both wallets, both game accounts and the expiry timestamp.
+pub const STAKE_NUM_STORAGE_ITEMS: usize = 9;
+pub fn stake_storage(
+    my_wallet: AccountId,
+    my_game: AccountId,
+    opp_wallet: AccountId,
+    opp_game: AccountId,
+    expiry: u64,
+) -> Vec<Felt> {
+    vec![
+        id_prefix(my_wallet),
+        id_suffix(my_wallet),
+        id_prefix(my_game),
+        id_suffix(my_game),
+        id_prefix(opp_wallet),
+        id_suffix(opp_wallet),
+        id_prefix(opp_game),
+        id_suffix(opp_game),
+        felt(expiry),
+    ]
+}
+
+/// Builds a stake note created by `my_wallet`, holding `asset`, tagged for the opponent's wallet.
+pub fn make_stake_note(
+    scripts: &BattleshipScripts,
+    my_wallet: AccountId,
+    my_game: AccountId,
+    opp_wallet: AccountId,
+    opp_game: AccountId,
+    expiry: u64,
+    asset: Asset,
+    serial_num: Word,
+) -> Result<Note> {
+    let storage = NoteStorage::new(stake_storage(
+        my_wallet, my_game, opp_wallet, opp_game, expiry,
+    ))
+    .context("invalid stake storage")?;
+    let recipient = NoteRecipient::new(serial_num, scripts.stake_note.clone(), storage);
+    let metadata = PartialNoteMetadata::new(my_wallet, NoteType::Public)
+        .with_tag(NoteTag::with_account_target(opp_wallet));
+    let assets = NoteAssets::new(vec![asset]).context("invalid stake assets")?;
+    Ok(Note::new(assets, metadata, recipient))
 }
 
 /// Defeat / forfeit note storage: `[wallet_prefix, wallet_suffix]`.

@@ -12,18 +12,22 @@ use integration::battleship::*;
 use miden_client::{
     account::{Account, AccountId},
     asset::FungibleAsset,
-    note::{Note, NoteId, PartialNote},
+    note::{Note, PartialNote},
     transaction::{
         ExecutedTransaction, RawOutputNote, TransactionExecutorError, TransactionScript,
     },
     Felt, Word,
 };
-use miden_protocol::errors::MasmError;
+use miden_protocol::{errors::MasmError, testing::account_id::ACCOUNT_ID_FEE_FAUCET};
 use miden_standards::tx_script::SendNotesTransactionScript;
 use miden_testing::{Auth, MockChain, MockTransactionBuilder};
 
 pub const BASE_FEE: u32 = 100;
 pub const INITIAL_FEE_BALANCE: u64 = 10_000_000;
+/// Fee-asset balance of each owner wallet at genesis (stakes are paid in the fee asset).
+pub const WALLET_BALANCE: u64 = 100_000_000;
+pub const STAKE: u64 = 5_000_000;
+pub const STAKE_EXPIRY_DELTA: u64 = 60 * 24 * 3600;
 pub const GAME_ID: [u64; 4] = [10, 20, 30, 40];
 pub const SEED_A: [u8; 32] = [1; 32];
 pub const SEED_B: [u8; 32] = [2; 32];
@@ -58,8 +62,12 @@ impl Game {
     pub fn new() -> Result<Self> {
         let scripts = BattleshipScripts::compile()?;
         let mut builder = MockChain::builder().verification_base_fee(BASE_FEE);
+        let fee_faucet = AccountId::try_from(ACCOUNT_ID_FEE_FAUCET)?;
         let mut player = |seed: [u8; 32]| -> Result<Player> {
-            let wallet = builder.add_existing_wallet(Auth::IncrNonce)?.id();
+            let funds = FungibleAsset::new(fee_faucet, WALLET_BALANCE)?;
+            let wallet = builder
+                .add_existing_wallet_with_assets(Auth::IncrNonce, [funds.into()])?
+                .id();
             let account = game_account_builder(seed, scripts.component.clone())
                 .build()
                 .context("failed to build game account")?;
@@ -527,8 +535,98 @@ impl Game {
         Ok(forfeit)
     }
 
+    /// Fee-asset balance of a public owner wallet.
+    pub fn wallet_balance(&self, wallet: AccountId) -> Result<u64> {
+        let fee_faucet = self.chain.fee_faucet_id();
+        Ok(self
+            .chain
+            .committed_account(wallet)?
+            .vault()
+            .get_balance(FungibleAsset::new(fee_faucet, 0)?.id())
+            .map(|amount| amount.as_u64())
+            .unwrap_or(0))
+    }
+
+    /// `player`'s wallet creates a stake note of `STAKE` fee-asset units naming the opponent.
+    pub async fn stake(&mut self, player: AccountId) -> Result<Note> {
+        let opp_game = self.opponent_of(player).id;
+        let expiry = self.now() + STAKE_EXPIRY_DELTA;
+        self.stake_custom(player, opp_game, expiry).await
+    }
+
+    /// A stake note from `player`'s wallet with an explicit opponent game account and expiry.
+    pub async fn stake_custom(
+        &mut self,
+        player: AccountId,
+        opp_game: AccountId,
+        expiry: u64,
+    ) -> Result<Note> {
+        let me = self.player(player).clone();
+        let opp_wallet = self.opponent_of(player).wallet;
+        let fee_faucet = self.chain.fee_faucet_id();
+        let asset = FungibleAsset::new(fee_faucet, STAKE)?.into();
+        let serial = self.fresh_serial();
+        let note = make_stake_note(
+            &self.scripts,
+            me.wallet,
+            me.id,
+            opp_wallet,
+            opp_game,
+            expiry,
+            asset,
+            serial,
+        )?;
+        let account = self.chain.committed_account(me.wallet)?.clone();
+        let interface = account.code().interface(me.wallet);
+        let script =
+            SendNotesTransactionScript::new(&interface, &[PartialNote::from(note.clone())])
+                .context("failed to build send-notes script for the stake")?;
+        let out = note.clone();
+        self.execute_wallet(me.wallet, move |builder| {
+            builder
+                .send_notes_script(&script)
+                .expected_output_note(RawOutputNote::Full(out))
+        })
+        .await?;
+        Ok(note)
+    }
+
+    /// `wallet` consumes `notes` in one transaction (a claim or a refund).
+    pub async fn claim(
+        &mut self,
+        wallet: AccountId,
+        notes: &[&Note],
+    ) -> Result<ExecutedTransaction> {
+        let ids: Vec<_> = notes.iter().map(|n| n.id()).collect();
+        self.execute_wallet(wallet, move |builder| {
+            builder.authenticated_input_notes(ids)
+        })
+        .await
+    }
+
+    /// Plays a complete game after the handshake: A sinks B's classic fleet while B misses.
+    /// Returns the defeat note B's account created for A's wallet.
+    pub async fn play_to_defeat(&mut self) -> Result<Note> {
+        let (a, b) = (self.a.id, self.b.id);
+        let cells = classic_ship_cells();
+        let mut shot = self.handshake(cells[0].0, cells[0].1).await?;
+        for i in 0..cells.len() {
+            let (result, defeat) = self.resolve(b, &shot).await?;
+            if i == cells.len() - 1 {
+                self.consume(a, &result).await?;
+                return defeat.context("the 17th hit creates a defeat note");
+            }
+            let b_shot = self.fire(b, 9 - (i as u64 / 10), i as u64 % 10).await?;
+            let (b_result, _) = self.resolve(a, &b_shot).await?;
+            let (nrow, ncol, _) = cells[i + 1];
+            shot = self.answer(a, &result, nrow, ncol).await?;
+            self.consume(b, &b_result).await?;
+        }
+        unreachable!()
+    }
+
     pub fn is_committed(&self, note: &Note) -> bool {
-        self.chain.is_note_committed(&NoteId::from(note.id()))
+        self.chain.is_note_committed(&note.id())
     }
 }
 
