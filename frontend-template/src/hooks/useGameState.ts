@@ -1,42 +1,35 @@
-import { useMemo, useEffect, useRef } from "react";
-import { useAccount, useImportAccount, useSyncState } from "@miden-sdk/react";
-import { SLOT_GAME_CONFIG, SLOT_OPPONENT } from "@/config";
+import { useMemo } from "react";
+import { useAccount, useSyncState } from "@miden-sdk/react";
+import { SLOT_GAME_CONFIG, SLOT_OPPONENT, SLOT_REVEAL_STATUS } from "@/config";
 import type { GamePhase, GameState } from "@/types/game";
 
-export function useGameState(accountId: string, skipImport = false) {
-  const { importAccount } = useImportAccount();
-  const { account, refetch } = useAccount(accountId);
+/** Minimal storage shape read by `readGameState` (matches `account.storage()`). */
+export interface GameStorageReader {
+  getItem(slotName: string): { toU64s(): ArrayLike<bigint> } | undefined;
+}
+
+/** Parses the game state from a game account's storage; null until the slots exist. */
+export function readGameState(storage: GameStorageReader): GameState | null {
+  const config = storage.getItem(SLOT_GAME_CONFIG);
+  const opponent = storage.getItem(SLOT_OPPONENT);
+  if (!config || !opponent) return null;
+  const configValues = config.toU64s();
+  const opponentValues = opponent.toU64s();
+  const reveal = storage.getItem(SLOT_REVEAL_STATUS)?.toU64s();
+  return {
+    phase: Number(configValues[2]) as GamePhase,
+    expectedTurn: Number(configValues[3]),
+    shipsHitCount: Number(opponentValues[2]),
+    totalShotsReceived: Number(opponentValues[3]),
+    myRevealed: reveal ? Number(reveal[0]) : 0,
+    opponentVerified: reveal ? Number(reveal[1]) : 0,
+  };
+}
+
+/** Game state of a locally tracked game account (null for untracked accounts, e.g. the opponent). */
+export function useGameState(accountId: string) {
+  const { account, refetch } = useAccount(accountId || undefined);
   const { sync } = useSyncState();
-
-  // Import the game account so the local client tracks it.
-  // Guard with a ref to only attempt once per accountId.
-  // skipImport=true for opponent accounts that can't be imported from network.
-  const importedRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (skipImport) return;
-    if (!accountId || importedRef.current === accountId) return;
-    importedRef.current = accountId;
-    importAccount({ type: "id", accountId }).catch(() => {});
-  }, [importAccount, accountId, skipImport]);
-
-  const gameState = useMemo<GameState | null>(() => {
-    if (!account) return null;
-
-    const config = account.storage().getItem(SLOT_GAME_CONFIG);
-    const opponent = account.storage().getItem(SLOT_OPPONENT);
-
-    if (!config || !opponent) return null;
-
-    const configValues = config.toU64s();
-    const opponentValues = opponent.toU64s();
-
-    return {
-      phase: Number(configValues[2]) as GamePhase,
-      expectedTurn: Number(configValues[3]),
-      shipsHitCount: Number(opponentValues[2]),
-      totalShotsReceived: Number(opponentValues[3]),
-    };
-  }, [account]);
-
+  const gameState = useMemo<GameState | null>(() => (account ? readGameState(account.storage()) : null), [account]);
   return { gameState, isLoading: !account, refetch, sync };
 }

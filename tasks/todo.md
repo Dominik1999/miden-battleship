@@ -20,12 +20,17 @@ web SDK 0.17.1 / react 0.17.0 in the browser. Base docs/workflow on 0xMiden/agen
 - [x] Frontend loads MASM sources via `@masm/*.masm?raw` (vite alias to project-template/contracts/masm) and compiles at runtime; result script root computed at runtime
 - [x] Frontend: packages bumped to 0.17, libs rewritten (board, contracts, funding, masmSources, notes, config)
 - [x] Frontend: hooks/components rewritten on lib/game.ts (typecheck clean)
-- [ ] Frontend: tests updated (vitest green) + production build
-- [ ] Browser test: two profiles, full game, fees paid
-- [ ] Update docs (README/CLAUDE/skills refs), lessons, memory
+- [x] Frontend: tests updated (54 vitest tests), tsc, eslint and production build green; wallet adapter removed (MidenProvider never initializes behind a disconnected signer; game accounts need no wallet)
+- [x] Browser test: two Playwright profiles (.mcp.json player1/player2), full game to COMPLETE on both sides (VICTORY/DEFEAT, boards revealed and verified), ~4,300 base units fees per account; screenshots in tasks/research/e2e-player{1,2}-final.png
+- [x] Update docs (README, ARCHITECTURE, CLAUDE.md x3, skills), lessons, memory, feedback.md
 
 ## Session notes (for restarts)
 - 2026-10-07 18:50: machine restarted mid-session; scratchpad research reports were lost. Keep research under tasks/research/ from now on.
 
 ## Review
-(filled at the end)
+- Contracts: 845-line MASM account component + 5 note scripts + 3 tx scripts; shot tx ~18k cycles (2^15), down from ~169k.
+- Rust: 31 MockChain tests on a fee-charging chain; `validate_testnet` full game between two clients (510 s); CLI rewritten.
+- Frontend: runtime MASM compilation, faucet-funded NoAuth accounts, no wallet adapter, state-derived handshake, auto reveal protocol; 54 vitest tests, tsc/eslint/build green.
+- Gates passed: MockChain, testnet validator, two-browser game on testnet.
+- Bugs found and fixed on the way: shared-client output notes never become input notes (kb note), wasm-bindgen Felt handle reuse (kb note), MidenProvider stuck behind a disconnected signer (kb note), handshake effect cancellation on stage change, accept-note dedupe across games.
+- Left as follow-ups: `.claude/hooks/build-contracts.sh` and `check-artifacts.sh` are pre-migration no-ops; `frontend-template/.claude/skills/{miden-concepts,frontend-pitfalls,vite-wasm-setup}` still mention the Rust SDK / SDK 0.13; game sessions live only in React state (a reload starts over).

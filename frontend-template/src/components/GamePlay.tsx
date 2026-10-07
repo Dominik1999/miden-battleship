@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { PlayerRole } from "@/types/game";
 import { PHASE_ACTIVE } from "@/types/game";
 import { TOTAL_SHIP_CELLS } from "@/config";
 import { useGameState } from "@/hooks/useGameState";
 import { useBoardState } from "@/hooks/useBoardState";
+import { buildEnemyBoard, nextShotTurn, type FiredShot } from "@/lib/gameplay";
 import { useFireShot } from "@/hooks/useFireShot";
 import { useGameplaySync } from "@/hooks/useGameplaySync";
 import { useSoundEffects } from "@/hooks/useSoundEffects";
@@ -15,42 +16,50 @@ interface GamePlayProps {
   accountA: string;
   accountB: string;
   playerRole: PlayerRole;
+  /** My board commitment, revealed to the opponent once the game is decided. */
+  commitment: bigint[] | null;
 }
 
-export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
+export function GamePlay({ accountA, accountB, playerRole, commitment }: GamePlayProps) {
   const myAccount = playerRole === "challenger" ? accountA : accountB;
   const opponentAccount = playerRole === "challenger" ? accountB : accountA;
 
-  // Read game state and board from SDK hooks (no workarounds needed since SDK 0.14.8)
   const { gameState: myState } = useGameState(myAccount);
   const { board: myBoard } = useBoardState(myAccount, false);
+  const { fireShot, isSubmitting, error } = useFireShot(myAccount, opponentAccount);
 
-  // Skip importing opponent — their game account can't be imported from network
-  const { gameState: opponentState, refetch: refetchOpponent } =
-    useGameState(opponentAccount, true);
-  const { board: opponentBoard } = useBoardState(opponentAccount, true);
+  // My shots, keyed by turn; pending until the result note arrives.
+  const [myShots, setMyShots] = useState<Map<number, FiredShot>>(new Map());
+  const hasFiredRef = useRef(false);
+  const prevShotsReceivedRef = useRef<number>(-1);
 
-  const { fireShot, isSubmitting, isWaiting, error } =
-    useFireShot(myAccount, opponentAccount, refetchOpponent);
-
-  const busy = isSubmitting || isWaiting;
-
-  // Auto-sync and auto-consume incoming shot notes on our game account.
-  // opponentGameOver is set when a result note with gameOver=1 is detected
-  // (meaning WE fired the winning shot and the opponent's ships are all sunk).
-  // Use a ref for gameOver to break the circular dependency (sync → state → gameOver → sync).
+  const iLost = myState ? myState.shipsHitCount >= TOTAL_SHIP_CELLS : false;
   const gameOverRef = useRef(false);
-  const { opponentGameOver } = useGameplaySync(
-    myAccount,
-    !busy && !gameOverRef.current,
-  );
+  const sync = useGameplaySync(myAccount, !isSubmitting, {
+    myState,
+    opponentAddress: opponentAccount,
+    commitment,
+  });
+  const iWon = sync.opponentGameOver;
+  const gameOver = iLost || iWon;
+  gameOverRef.current = gameOver;
 
-  const {
-    playShot, playDefeat,
-    startMusic, stopMusic, setMusicVolume, musicPlaying, musicVolume,
-  } = useSoundEffects();
+  // Apply result notes to the shot log.
+  useEffect(() => {
+    setMyShots((prev) => {
+      let next: Map<number, FiredShot> | null = null;
+      for (const result of sync.results) {
+        const shot = (next ?? prev).get(result.turn);
+        if (!shot || shot.status !== "pending") continue;
+        next ??= new Map(prev);
+        next.set(result.turn, { ...shot, status: result.isHit ? "hit" : "miss" });
+      }
+      return next ?? prev;
+    });
+  }, [sync.results]);
 
-  // Auto-start music when game is active
+  const { playShot, playDefeat, startMusic, stopMusic, setMusicVolume, musicPlaying, musicVolume } = useSoundEffects();
+
   const musicStarted = useRef(false);
   useEffect(() => {
     if (myState?.phase === PHASE_ACTIVE && !musicStarted.current) {
@@ -59,124 +68,64 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
     }
   }, [myState?.phase, startMusic]);
 
-  // Local turn tracking: we can't rely on opponentState (always null).
-  // Track whether we've fired and reset when totalShotsReceived changes
-  // (meaning the opponent fired back and their shot was consumed).
-  const hasFiredRef = useRef(false);
-  const prevShotsReceivedRef = useRef<number>(-1);
-
-  // Joiner ("acceptor" in frontend) fires first (odd turns: 1, 3, 5...)
-  // Starter ("challenger" in frontend) fires second (even turns: 2, 4, 6...)
-  const isJoiner = playerRole === "acceptor";
-
+  // The opponent's shot landed on my account: my turn again.
   if (myState) {
     const currentShots = myState.totalShotsReceived;
     if (currentShots !== prevShotsReceivedRef.current) {
-      if (prevShotsReceivedRef.current !== -1) {
-        // Received a new shot from opponent — it's our turn again
-        hasFiredRef.current = false;
-      }
+      if (prevShotsReceivedRef.current !== -1) hasFiredRef.current = false;
       prevShotsReceivedRef.current = currentShots;
     }
   }
 
   const isMyTurn = (() => {
-    if (!myState || myState.phase !== PHASE_ACTIVE || hasFiredRef.current) return false;
-    if (isJoiner) {
-      // Joiner fires first (with 0 shots received), then after each received shot
-      return true;
-    }
-    // Starter must wait to receive shot 1 before firing shot 2
+    if (!myState || myState.phase !== PHASE_ACTIVE || hasFiredRef.current || gameOver) return false;
+    if (playerRole === "challenger") return true;
     return myState.totalShotsReceived > 0;
   })();
 
-  // Loss: detected from own state (shipsHitCount >= 17).
-  // Win: detected from result note gameOver flag (opponentGameOver) OR
-  //      from opponentState if available (fallback, usually null).
-  const iLost = myState ? myState.shipsHitCount >= TOTAL_SHIP_CELLS : false;
-  const iWon = opponentGameOver || (opponentState ? opponentState.shipsHitCount >= TOTAL_SHIP_CELLS : false);
-  const gameOver = iLost || iWon;
-  gameOverRef.current = gameOver;
-
-  // Sound effects on own state changes
   const prevMyHits = useRef<number | null>(null);
-  const prevMyShots = useRef<number | null>(null);
-
   useEffect(() => {
     if (!myState) return;
-
-    // Detect we got hit (opponent's shot landed on our ship)
-    if (
-      prevMyHits.current !== null &&
-      myState.shipsHitCount > prevMyHits.current
-    ) {
-      if (myState.shipsHitCount >= TOTAL_SHIP_CELLS) {
-        stopMusic();
-        playDefeat();
-      }
+    if (prevMyHits.current !== null && myState.shipsHitCount > prevMyHits.current && myState.shipsHitCount >= TOTAL_SHIP_CELLS) {
+      stopMusic();
+      playDefeat();
     }
-
-    // Detect opponent fired at us (shot consumed) but missed
-    if (
-      prevMyShots.current !== null &&
-      myState.totalShotsReceived > prevMyShots.current &&
-      myState.shipsHitCount === (prevMyHits.current ?? 0)
-    ) {
-      // Opponent missed us — no sound needed for that on our side
-    }
-
     prevMyHits.current = myState.shipsHitCount;
-    prevMyShots.current = myState.totalShotsReceived;
   }, [myState, playDefeat, stopMusic]);
 
-  // Compute the turn number for our next shot
-  const shotTurnNumber = (() => {
-    if (!myState) return 1;
-    if (isJoiner) {
-      // Joiner fires turns 1, 3, 5... = 2 * totalShotsReceived + 1
-      return 2 * myState.totalShotsReceived + 1;
-    }
-    // Starter fires turns 2, 4, 6... = 2 * totalShotsReceived
-    return 2 * myState.totalShotsReceived;
-  })();
+  const shotTurnNumber = myState ? nextShotTurn(playerRole, myState.totalShotsReceived) : 1;
 
-  // Optimistic UI: track pending shots (shown as pulsing markers on enemy board)
-  const [pendingShots, setPendingShots] = useState<Set<string>>(new Set());
-
-  // Reset hasFiredRef and clear pending shots when a shot fails
   useEffect(() => {
     if (error) {
       hasFiredRef.current = false;
-      setPendingShots(new Set());
+      setMyShots((prev) => {
+        const next = new Map(prev);
+        for (const [turn, shot] of next) if (shot.status === "pending") next.delete(turn);
+        return next;
+      });
     }
   }, [error]);
 
-  // Clear pending shots when they're confirmed (opponent board updates with hit/miss)
-  // This happens when the gameplay sync processes the result and refetchAccount updates the board
-  const prevTotalShotsRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (!myState) return;
-    const currentShots = myState.totalShotsReceived;
-    if (prevTotalShotsRef.current !== null && currentShots !== prevTotalShotsRef.current) {
-      // State changed — clear pending shots (they'll now show as hit/miss from the board data)
-      setPendingShots(new Set());
-    }
-    prevTotalShotsRef.current = currentShots;
-  }, [myState]);
-
   const handleCellClick = useCallback(
     (row: number, col: number) => {
-      if (!isMyTurn || busy || !myState) return;
+      if (!isMyTurn || isSubmitting || !myState) return;
       playShot();
       hasFiredRef.current = true;
-      // Optimistic: show pending marker immediately
-      setPendingShots((prev) => new Set(prev).add(`${row},${col}`));
-      fireShot(row, col, shotTurnNumber);
+      setMyShots((prev) => new Map(prev).set(shotTurnNumber, { row, col, status: "pending" }));
+      void fireShot(row, col, shotTurnNumber);
     },
-    [isMyTurn, busy, myState, shotTurnNumber, fireShot, playShot],
+    [isMyTurn, isSubmitting, myState, shotTurnNumber, fireShot, playShot],
   );
 
-  if (!myBoard || !opponentBoard) {
+  const enemyBoard = useMemo(() => buildEnemyBoard(myShots), [myShots]);
+  const pendingShots = useMemo(() => {
+    const set = new Set<string>();
+    for (const shot of myShots.values()) if (shot.status === "pending") set.add(`${shot.row},${shot.col}`);
+    return set;
+  }, [myShots]);
+  const enemyHits = useMemo(() => [...myShots.values()].filter((s) => s.status === "hit").length, [myShots]);
+
+  if (!myBoard) {
     return <div className="game-loading">Loading boards...</div>;
   }
 
@@ -184,49 +133,35 @@ export function GamePlay({ accountA, accountB, playerRole }: GamePlayProps) {
     <div className="game-play">
       <GameStatus
         myState={myState}
-        opponentState={opponentState}
-        opponentGameOver={opponentGameOver}
+        enemyHits={enemyHits}
+        opponentGameOver={iWon}
         isMyTurn={isMyTurn}
-        isSyncing={isWaiting}
+        isSyncing={isSubmitting}
+        feeBalance={sync.feeBalance}
       />
 
       <div className="boards-container">
         <GameBoard board={myBoard} label="Your Fleet" />
         <GameBoard
-          board={opponentBoard}
+          board={enemyBoard}
           label="Enemy Waters"
-          interactive={isMyTurn && !busy && !gameOver}
+          interactive={isMyTurn && !isSubmitting && !gameOver}
           pendingShots={pendingShots}
           onCellClick={handleCellClick}
         />
       </div>
 
       {error && <p className="error">{error}</p>}
+      {sync.lastError && <p className="error">{sync.lastError}</p>}
 
-      {busy && (
-        <div className="busy-indicator">
-          {isSubmitting ? "Submitting shot..." : "Waiting for network..."}
-        </div>
-      )}
+      {isSubmitting && <div className="busy-indicator">Submitting shot...</div>}
 
       <div className="music-controls">
-        <button
-          className="music-toggle"
-          onClick={musicPlaying ? stopMusic : startMusic}
-          title={musicPlaying ? "Mute music" : "Play music"}
-        >
+        <button className="music-toggle" onClick={musicPlaying ? stopMusic : startMusic} title={musicPlaying ? "Mute music" : "Play music"}>
           {musicPlaying ? "♫" : "♪"}
         </button>
         {musicPlaying && (
-          <input
-            type="range"
-            className="music-volume"
-            min={0}
-            max={1}
-            step={0.05}
-            value={musicVolume}
-            onChange={(e) => setMusicVolume(Number(e.target.value))}
-          />
+          <input type="range" className="music-volume" min={0} max={1} step={0.05} value={musicVolume} onChange={(e) => setMusicVolume(Number(e.target.value))} />
         )}
       </div>
     </div>

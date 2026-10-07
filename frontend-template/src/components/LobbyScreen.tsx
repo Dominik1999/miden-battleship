@@ -3,16 +3,15 @@ import { clearMidenStorage } from "@miden-sdk/react";
 import "./LobbyScreen.css";
 
 interface LobbyScreenProps {
-  walletConnected: boolean;
   onStartGame: () => void;
   onJoinGame: (gameId: string) => void;
 }
 
-export function LobbyScreen({
-  walletConnected,
-  onStartGame,
-  onJoinGame,
-}: LobbyScreenProps) {
+/**
+ * Game accounts are self-funded from the faucet and need no wallet, so both flows are
+ * available without a wallet connection.
+ */
+export function LobbyScreen({ onStartGame, onJoinGame }: LobbyScreenProps) {
   const [showJoinInput, setShowJoinInput] = useState(false);
   const [gameId, setGameId] = useState("");
 
@@ -21,26 +20,16 @@ export function LobbyScreen({
   return (
     <div className="lobby">
       <div className="lobby-buttons">
-        <button
-          className="lobby-btn"
-          disabled={!walletConnected}
-          onClick={onStartGame}
-        >
+        <button className="lobby-btn" onClick={onStartGame}>
           Start Game
         </button>
 
-        <button
-          className="lobby-btn"
-          disabled={!walletConnected}
-          onClick={() => setShowJoinInput((v) => !v)}
-        >
+        <button className="lobby-btn" onClick={() => setShowJoinInput((v) => !v)}>
           Join Game
         </button>
       </div>
 
-      {!walletConnected && (
-        <p className="lobby-hint">Connect your wallet to play</p>
-      )}
+      <p className="lobby-hint">Game accounts pay their own fees from the testnet faucet — no wallet needed.</p>
 
       <button
         className="lobby-btn reset-btn"
@@ -54,7 +43,7 @@ export function LobbyScreen({
         Reset Client Data
       </button>
 
-      {showJoinInput && walletConnected && (
+      {showJoinInput && (
         <div className="join-input-section">
           <label htmlFor="game-id-input">Enter Game ID</label>
           <input

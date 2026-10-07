@@ -1,8 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
 import { useMiden, useSyncState } from "@miden-sdk/react";
-import { useMidenFiWallet } from "@miden-sdk/miden-wallet-adapter";
+import { useGameSyncHeight } from "@/lib/syncHeight";
 import type { ShipCell } from "@/types/game";
-import { WalletButton } from "./WalletButton";
 import { ShipPlacement } from "./ShipPlacement";
 import { LobbyScreen } from "./LobbyScreen";
 import { WaitingScreen } from "./WaitingScreen";
@@ -15,35 +14,13 @@ type Screen = "lobby" | "placement" | "waiting" | "play";
 type FlowMode = "start" | "join" | null;
 
 function GameScreens() {
-  const { connected } = useMidenFiWallet();
-
   const [screen, setScreen] = useState<Screen>("lobby");
   const [flowMode, setFlowMode] = useState<FlowMode>(null);
   const [joinTargetId, setJoinTargetId] = useState<string | null>(null);
 
-  const {
-    startGame,
-    consumeNotes: startConsumeNotes,
-    consumableNoteCount: startNoteCount,
-    isConsuming: startIsConsuming,
-    stage: startStage,
-    error: startError,
-    gameAccountAddress: startGameAddress,
-    opponentAddress,
-  } = useStartGame();
+  const start = useStartGame();
+  const join = useJoinGame();
 
-  const {
-    joinGame,
-    consumeNotes: joinConsumeNotes,
-    consumableNoteCount: joinNoteCount,
-    isConsuming: joinIsConsuming,
-    stage: joinStage,
-    error: joinError,
-    gameAccountAddress: joinGameAddress,
-    starterAddress,
-  } = useJoinGame();
-
-  // --- Lobby handlers ---
   const handleStartGame = useCallback(() => {
     setFlowMode("start");
     setScreen("placement");
@@ -55,88 +32,57 @@ function GameScreens() {
     setScreen("placement");
   }, []);
 
-  // --- Ship placement handler ---
   const handlePlacementConfirm = useCallback(
     async (cells: ShipCell[]) => {
       setScreen("waiting");
-
       if (flowMode === "start") {
-        await startGame(cells);
+        await start.startGame(cells);
       } else if (flowMode === "join" && joinTargetId) {
-        await joinGame(joinTargetId, cells);
+        await join.joinGame(joinTargetId, cells);
       }
     },
-    [flowMode, joinTargetId, startGame, joinGame],
+    [flowMode, joinTargetId, start, join],
   );
 
-  // --- Transition to play when ready ---
   useEffect(() => {
-    if (flowMode === "start" && startStage === "ready") {
-      setScreen("play");
-    }
-  }, [flowMode, startStage]);
+    if (flowMode === "start" && start.stage === "ready") setScreen("play");
+  }, [flowMode, start.stage]);
 
   useEffect(() => {
-    if (flowMode === "join" && joinStage === "ready") {
-      setScreen("play");
-    }
-  }, [flowMode, joinStage]);
+    if (flowMode === "join" && join.stage === "ready") setScreen("play");
+  }, [flowMode, join.stage]);
 
-  // --- Derive game config for GamePlay ---
+  // The joiner is the challenger (fires first); the starter is the acceptor.
   const gameConfig = (() => {
-    if (flowMode === "start" && startGameAddress && opponentAddress) {
-      return {
-        accountA: startGameAddress,
-        accountB: opponentAddress,
-        role: "challenger" as const,
-      };
+    if (flowMode === "start" && start.gameAccountAddress && start.opponentAddress) {
+      return { accountA: start.opponentAddress, accountB: start.gameAccountAddress, role: "acceptor" as const, commitment: start.commitment };
     }
-    if (flowMode === "join" && joinGameAddress && starterAddress) {
-      return {
-        accountA: starterAddress,
-        accountB: joinGameAddress,
-        role: "acceptor" as const,
-      };
+    if (flowMode === "join" && join.gameAccountAddress && join.starterAddress) {
+      return { accountA: join.gameAccountAddress, accountB: join.starterAddress, role: "challenger" as const, commitment: join.commitment };
     }
     return null;
   })();
 
+  const flow = flowMode === "start" ? start : join;
+
   return (
     <>
-      {screen === "lobby" && (
-        <LobbyScreen
-          walletConnected={connected}
-          onStartGame={handleStartGame}
-          onJoinGame={handleJoinGame}
-        />
-      )}
+      {screen === "lobby" && <LobbyScreen onStartGame={handleStartGame} onJoinGame={handleJoinGame} />}
 
-      {screen === "placement" && (
-        <ShipPlacement onConfirm={handlePlacementConfirm} />
-      )}
+      {screen === "placement" && <ShipPlacement onConfirm={handlePlacementConfirm} />}
 
       {screen === "waiting" && (
         <WaitingScreen
-          gameId={
-            flowMode === "start"
-              ? startGameAddress
-              : joinTargetId
-          }
+          gameId={flowMode === "start" ? start.gameAccountAddress : joinTargetId}
           isStarter={flowMode === "start"}
-          stage={flowMode === "start" ? startStage : joinStage}
-          error={flowMode === "start" ? startError : joinError}
-          consumableNoteCount={flowMode === "start" ? startNoteCount : joinNoteCount}
-          isConsuming={flowMode === "start" ? startIsConsuming : joinIsConsuming}
-          onConsumeNotes={flowMode === "start" ? startConsumeNotes : joinConsumeNotes}
+          stage={flow.stage}
+          status={flow.status}
+          error={flow.error}
         />
       )}
 
       {screen === "play" && gameConfig && (
-        <GamePlay
-          accountA={gameConfig.accountA}
-          accountB={gameConfig.accountB}
-          playerRole={gameConfig.role}
-        />
+        <GamePlay accountA={gameConfig.accountA} accountB={gameConfig.accountB} playerRole={gameConfig.role} commitment={gameConfig.commitment} />
       )}
     </>
   );
@@ -144,16 +90,15 @@ function GameScreens() {
 
 export function AppContent() {
   const { isReady, isInitializing, error } = useMiden();
-  const { syncHeight } = useSyncState();
+  const { syncHeight: providerHeight } = useSyncState();
+  const gameHeight = useGameSyncHeight();
+  const syncHeight = gameHeight ?? providerHeight;
 
   const clientReady = isReady && !isInitializing;
 
   return (
     <>
       <h1 className="game-title">Miden Battleship</h1>
-      <div className="wallet-section">
-        <WalletButton />
-      </div>
 
       {error && (
         <div className="loading">
@@ -162,17 +107,11 @@ export function AppContent() {
         </div>
       )}
 
-      {!error && !clientReady && (
-        <div className="loading">
-          Initializing Miden client... Connect your wallet above.
-        </div>
-      )}
+      {!error && !clientReady && <div className="loading">Initializing Miden client...</div>}
 
       {clientReady && <GameScreens />}
 
-      <p className="footer-info">
-        Block: {syncHeight ?? "syncing..."}
-      </p>
+      <p className="footer-info">Block: {syncHeight ?? "syncing..."}</p>
     </>
   );
 }

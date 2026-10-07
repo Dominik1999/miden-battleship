@@ -1,181 +1,110 @@
 ---
 name: rust-sdk-testing-patterns
-description: Guide to testing Miden smart contracts with MockChain. Covers test setup, contract building, account/note creation, transaction execution, storage verification, faucet setup, and output note verification. Use when writing, editing, or debugging Miden integration tests.
+description: Guide to testing the MASM contracts with miden-testing 0.17's MockChain. Covers the shared Game harness, fee-charging chain setup, running transaction scripts with advice inputs, publishing and consuming notes, output notes created by account code, storage assertions, matching MASM error messages, and cycle measurements. Use when writing, editing, or debugging integration tests in integration/tests/.
 ---
 
-# Miden Testing Patterns (MockChain)
+# MockChain Testing Patterns (miden-testing 0.17)
 
 ## Test File Setup
 
-Tests go in `integration/tests/`. All tests are async and use MockChain for local execution without a network.
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) for a complete working test covering imports, MockChain setup, contract building, account creation with storage, note creation, transaction execution, and storage verification.
-
-## Step-by-Step Test Pattern
-
-### 1. Initialize MockChain Builder
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) line 17 for the pattern: `let mut builder = MockChain::builder();`
-
-### 2. Create Sender/Wallet Accounts
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) line 20 for the basic wallet pattern. For wallets with pre-funded assets, use `builder.add_existing_wallet_with_assets(Auth::BasicAuth, [FungibleAsset::new(faucet.id(), 100)?.into()])`.
-
-### 3. Set Up Faucets (for fungible assets)
-```rust
-let faucet = builder.add_existing_basic_faucet(
-    Auth::BasicAuth,
-    "TOKEN",     // token symbol
-    1000,        // max supply
-    Some(10),    // decimals (None for 0)
-)?;
-```
-
-### 4. Build Contracts
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) lines 23-30 for the pattern using `build_project_in_dir`.
-
-### 5. Create Account with Storage
-
-**Storage slot naming convention** (CRITICAL):
-```
-miden::component::[snake_case(package.metadata.component.package)]::[field_name]
-```
-
-Examples:
-- Package `miden:counter-account`, field `count_map` -> `miden::component::miden_counter_account::count_map`
-- Package `miden:bank-account`, field `balances` -> `miden::component::miden_bank_account::balances`
-
-Rule: Replace colons and hyphens with underscores in the package name.
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) lines 33-51 for a complete StorageMap example with `StorageSlotName`, `StorageSlot::with_map`, `AccountCreationConfig`, and `create_testing_account_from_package`.
-
-For a Value slot (single Word) instead of a StorageMap:
-```rust
-let value_slot_name = StorageSlotName::new("miden::component::miden_bank_account::initialized").unwrap();
-let storage_slots = vec![StorageSlot::with_value(
-    value_slot_name.clone(),
-    Word::default(),
-)];
-```
-
-### 6. Create Notes
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) lines 54-58 for basic note creation with `create_testing_note_from_package`.
-
-For notes with assets and inputs:
-```rust
-use miden_client::note::NoteAssets;
-use miden_standards::notes::FungibleAsset;
-
-let note_assets = NoteAssets::new(vec![FungibleAsset::new(faucet.id(), 50)?.into()])?;
-let note = create_testing_note_from_package(
-    note_package.clone(),
-    sender.id(),
-    NoteCreationConfig {
-        assets: note_assets,
-        inputs: vec![Felt::new(42), Felt::new(0)],
-        ..Default::default()
-    },
-)?;
-```
-
-### 7. Add to MockChain and Build
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) lines 61-65 for adding accounts, notes, and building the mock chain.
-
-### 8. Execute Transaction
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) lines 67-79 for the full execution flow: `build_tx_context` -> `execute()` -> `apply_delta()` -> `add_pending_executed_transaction()` -> `prove_next_block()`.
-
-### 9. Execute with Transaction Script
-```rust
-use miden_client::transaction::TransactionScript;
-
-let tx_script_package = Arc::new(build_project_in_dir(
-    Path::new("../contracts/my-tx-script"),
-    true,
-)?);
-let program = tx_script_package.unwrap_program();
-let tx_script = TransactionScript::new((*program).clone());
-
-let tx_context = mock_chain
-    .build_tx_context(account.id(), &[], &[])?
-    .tx_script(tx_script)
-    .build()?;
-
-let executed = tx_context.execute().await?;
-account.apply_delta(executed.account_delta())?;
-mock_chain.add_pending_executed_transaction(&executed)?;
-mock_chain.prove_next_block()?;
-```
-
-### 10. Verify Storage State
-
-See [counter_test.rs](../../../integration/tests/counter_test.rs) lines 82-92 for reading a StorageMap value and asserting on the result.
-
-### 11. Verify Output Notes
-```rust
-use miden_client::note::{Note, NoteAssets, NoteMetadata, NoteRecipient};
-
-let expected_note = Note::new(expected_assets, expected_metadata, expected_recipient);
-
-let tx_context = mock_chain
-    .build_tx_context(account.id(), &[note.id()], &[])?
-    .extend_expected_output_notes(vec![OutputNote::Full(expected_note)])
-    .build()?;
-
-// execute() will verify output notes match
-let executed = tx_context.execute().await?;
-```
-
-## Multi-Step Test Pattern
-
-For contracts requiring initialization before use:
+Tests go in `integration/tests/`. All tests are async (`#[tokio::test]`) and use the shared harness in [tests/common/mod.rs](../../../integration/tests/common/mod.rs):
 
 ```rust
+mod common;
+use anyhow::Result;
+use common::*;
+use integration::battleship::*;
+
 #[tokio::test]
-async fn multi_step_test() -> anyhow::Result<()> {
-    let mut builder = MockChain::builder();
-    // ... setup ...
-    let mut mock_chain = builder.build()?;
-
-    // Step 1: Initialize (via tx script)
-    let init_tx_context = mock_chain
-        .build_tx_context(account.id(), &[], &[])?
-        .tx_script(init_script)
-        .build()?;
-    let executed_init = init_tx_context.execute().await?;
-    account.apply_delta(executed_init.account_delta())?;
-    mock_chain.add_pending_executed_transaction(&executed_init)?;
-    mock_chain.prove_next_block()?;
-
-    // Step 2: Main operation (via note consumption)
-    let tx_context = mock_chain
-        .build_tx_context(account.id(), &[note.id()], &[])?
-        .build()?;
-    let executed = tx_context.execute().await?;
-    account.apply_delta(executed.account_delta())?;
-    mock_chain.add_pending_executed_transaction(&executed)?;
-    mock_chain.prove_next_block()?;
-
-    // Step 3: Verify state
-    // ...
-
+async fn shot_hit_marks_cell_and_counts() -> Result<()> {
+    let mut game = Game::new()?;          // compiles the MASM, 3 funded accounts, fees on
+    game.handshake().await?;              // both ACTIVE
+    let (_, result) = game.fire(game.a, game.b, 0, 0, 1).await?;
+    assert_eq!(game.cell(game.b, 0, 0)?, CELL_HIT);
+    assert_eq!(game.state(game.b)?.ships_hit_count, 1);
+    assert_eq!(ResultNoteStorage::from_items(result.recipient().storage().items())?.result.encode(), 2);
     Ok(())
 }
 ```
 
+See [battleship_test.rs](../../../integration/tests/battleship_test.rs) for the success paths and [battleship_failure_test.rs](../../../integration/tests/battleship_failure_test.rs) for rejections.
+
+## The `Game` Harness
+
+| Member | What it does |
+|--------|--------------|
+| `Game::new()` / `with_base_fee(n)` | `MockChain::builder().verification_base_fee(BASE_FEE)`; accounts A, B (players) and C (stranger) built with `game_account_builder(seed, component).with_assets([fee asset]).build_existing()` |
+| `state(id)`, `cell(id, row, col)`, `fee_balance(id)` | Read committed storage via `GameState::from_account`, `read_board_cell`, the vault |
+| `execute(id, configure)` | `chain.build_transaction(id)` -> configure the `MockTransactionBuilder` -> `build()?.execute().await?` -> `add_pending_executed_transaction` -> `prove_next_block` |
+| `run_script(id, script, arg, advice_map)` | `tx_script` + `tx_script_args` + `add_advice_map_entry` |
+| `setup(id, opponent, commitment)` / `setup_with_rows` | Runs `setup_tx` with the classic board (or custom rows for failure tests) |
+| `publish(from, note)` | `SendNotesTransactionScript` from the account interface + `expected_output_note(RawOutputNote::Full(note))` — the same path as the client's `own_output_notes` |
+| `consume(id, &note)` | `authenticated_input_note(note.id())` |
+| `consume_shot(id, &shot)` | adds `add_note_script(result_script)` so the executor can build the result note the component creates |
+| `consume_shot_expecting(id, &shot, expected)` | declares the exact result note (`expected_output_note`) — the client's `expected_output_recipients` path |
+| `challenge_note()`, `accept_note()`, `shot_note(..)`, `reveal_note(..)` | `make_game_note` with fresh serials |
+| `handshake()`, `fire(shooter, defender, row, col, turn)` | Multi-step flows; `fire` returns the defender's tx and the result note |
+| `result_note_of(&executed)` | Finds the output note whose script root is the result script |
+
+## Step-by-Step Patterns
+
+### 1. Chain with fees and funded accounts
+```rust
+let mut builder = MockChain::builder().verification_base_fee(100);
+let fee_asset = FungibleAsset::new(fee_faucet_id(), 10_000_000)?;   // ACCOUNT_ID_FEE_FAUCET
+let account = game_account_builder(seed, component).with_assets([fee_asset.into()]).build_existing()?;
+builder.add_account(account.clone())?;
+let mut chain = builder.build()?;
+```
+With base fee 0 a transaction that changes nothing fails ("neither changed the account state, nor consumed any notes"); keep fees on.
+
+### 2. Run a transaction script with an advice-map payload
+```rust
+let payload = build_setup_payload(word(GAME_ID), opponent, word(commitment), &rows);
+let key = setup_payload_commitment(&payload);
+game.run_script(id, game.scripts.setup_tx.clone(), Some(key), vec![(key, payload)]).await?;
+```
+
+### 3. Publish and consume a note
+```rust
+let challenge = game.challenge_note()?;
+game.publish(game.a, challenge.clone()).await?;   // committed in a new block
+game.consume(game.b, &challenge).await?;
+assert_eq!(game.state(game.b)?.phase, PHASE_ACTIVE);
+```
+
+### 4. Output note created by account code
+```rust
+let (executed, result) = game.fire(game.a, game.b, 5, 5, 1).await?;   // consume_shot under the hood
+assert_eq!(result.metadata().tag(), NoteTag::with_account_target(game.a));
+// or declare it up front:
+let expected = expected_result_note(game.scripts.result_note.clone(), game.b, game.a, 1, ShotResult { is_hit: false, game_over: false }, result_serial)?;
+game.consume_shot_expecting(game.b, &shot, expected).await?;
+```
+
+### 5. Assert a rejection by its MASM message
+```rust
+let result = game.consume(game.c, &shot).await;   // stranger
+assert_masm_error(result, "note sender prefix does not match the stored opponent");
+```
+`assert_masm_error` downcasts to `TransactionExecutorError::TransactionProgramExecutionFailed` and uses `MasmError::new(msg).matches_execution_error`. The message must equal the `ERR_...` constant in the MASM.
+
+### 6. Measure cycles
+```rust
+let m = executed.measurements();
+println!("{} cycles, 2^{} trace, fee {}", m.total_cycles(), m.total_cycles().next_power_of_two().trailing_zeros(), executed.compute_fee().as_u64());
+```
+Run `cargo test -p integration --release --test cycle_benchmark_test -- --nocapture`.
+
 ## Key Dependencies
 
-See [integration/Cargo.toml](../../../integration/Cargo.toml) for the current dependency versions used in this project.
+See [integration/Cargo.toml](../../../integration/Cargo.toml): `miden-testing` 0.17.1, `miden-protocol` 0.17.1 (`testing`), `miden-standards` 0.17.1 (`testing`), `miden-client` 0.17.2 (`testing`, `tonic`), `tokio`, `anyhow`.
 
 ## Validation Checklist
 
-- [ ] Test function is `async` and uses `#[tokio::test]`
-- [ ] Storage slot names follow `miden::component::package_name::field_name` pattern
-- [ ] All contracts built before account/note creation
-- [ ] `apply_delta()` called after each `execute()`
-- [ ] `prove_next_block()` called after `add_pending_executed_transaction()`
-- [ ] Notes added to builder via `add_output_note(OutputNote::Full(...))`
-- [ ] Faucet set up before creating assets
+- [ ] Test is `async` with `#[tokio::test]` and returns `anyhow::Result<()>`
+- [ ] Uses the `Game` harness (fees on, three accounts) rather than a hand-built chain
+- [ ] Every success test asserts storage (`state`, `cell`) — not just `is_ok()`
+- [ ] Every failure test uses `assert_masm_error` with the exact `ERR_...` message
+- [ ] A transaction that creates a note from account code uses `consume_shot` / `consume_shot_expecting`
+- [ ] New harness helpers mirror what the client does (`own_output_notes`, `expected_output_recipients`) so `validate_testnet.rs` can reuse the flow

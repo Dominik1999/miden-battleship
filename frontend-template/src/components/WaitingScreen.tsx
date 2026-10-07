@@ -9,40 +9,28 @@ interface WaitingScreenProps {
   gameId: string | null;
   isStarter: boolean;
   stage: Stage;
+  /** Progress line from the flow (faucet, setup, handshake...). */
+  status: string;
   error: string | null;
-  consumableNoteCount: number;
-  isConsuming: boolean;
-  onConsumeNotes: () => void;
 }
 
 const STARTER_LABELS: Partial<Record<StartStage, string>> = {
-  loading: "Loading contract packages...",
-  "creating-account": "Creating game account...",
+  preparing: "Preparing your game account...",
   "waiting-for-opponent": "Waiting for opponent to join...",
   completing: "Opponent found! Completing handshake...",
-  syncing: "Waiting for network sync...",
   ready: "Game ready!",
 };
 
 const JOINER_LABELS: Partial<Record<JoinStage, string>> = {
-  loading: "Loading contract packages...",
-  "creating-account": "Creating game account...",
+  preparing: "Preparing your game account...",
   "setting-up": "Setting up your board...",
   challenging: "Sending challenge to opponent...",
-  syncing: "Waiting for network sync...",
   waiting: "Waiting for opponent to accept...",
+  accepting: "Opponent accepted! Activating the game...",
   ready: "Game ready!",
 };
 
-export function WaitingScreen({
-  gameId,
-  isStarter,
-  stage,
-  error,
-  consumableNoteCount,
-  isConsuming,
-  onConsumeNotes,
-}: WaitingScreenProps) {
+export function WaitingScreen({ gameId, isStarter, stage, status, error }: WaitingScreenProps) {
   const [copied, setCopied] = useState(false);
 
   const handleCopy = useCallback(async () => {
@@ -53,13 +41,8 @@ export function WaitingScreen({
   }, [gameId]);
 
   const labels = isStarter ? STARTER_LABELS : JOINER_LABELS;
-  const statusMessage =
-    labels[stage as keyof typeof labels] ?? "Preparing game...";
-
-  const isWaiting =
-    stage === "waiting-for-opponent" ||
-    stage === "waiting" ||
-    stage === "syncing";
+  const statusMessage = labels[stage as keyof typeof labels] ?? "Preparing game...";
+  const isWaiting = stage !== "ready" && stage !== "error";
 
   return (
     <div className="waiting-screen">
@@ -78,23 +61,9 @@ export function WaitingScreen({
       )}
 
       <p className="waiting-status">{statusMessage}</p>
+      {status && <p className="waiting-detail">{status}</p>}
 
       {isWaiting && <div className="waiting-spinner" />}
-
-      {consumableNoteCount > 0 && (
-        <div className="consume-section">
-          <p className="consume-info">
-            {consumableNoteCount} incoming note{consumableNoteCount !== 1 ? "s" : ""} found
-          </p>
-          <button
-            className="consume-btn"
-            onClick={onConsumeNotes}
-            disabled={isConsuming}
-          >
-            {isConsuming ? "Consuming..." : `Consume ${consumableNoteCount} note${consumableNoteCount !== 1 ? "s" : ""}`}
-          </button>
-        </div>
-      )}
 
       {error && <p className="error">{error}</p>}
     </div>

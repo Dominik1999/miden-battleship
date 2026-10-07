@@ -2,23 +2,6 @@ import { render, screen } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 
 vi.mock("@miden-sdk/react", () => import("@/__tests__/mocks/miden-sdk-react"));
-vi.mock("@miden-sdk/miden-wallet-adapter", () => ({
-  useMidenFiWallet: () => ({
-    address: "mtst1wallet",
-    connected: true,
-    connecting: false,
-    requestTransaction: vi.fn(),
-    createAccount: vi.fn(),
-    wallets: [],
-    connect: vi.fn(),
-    disconnect: vi.fn(),
-  }),
-  Transaction: { createCustomTransaction: vi.fn(() => ({})) },
-  WalletReadyState: { Installed: "Installed", Loadable: "Loadable" },
-}));
-vi.mock("@/components/WalletButton", () => ({
-  WalletButton: () => <button>Connect Wallet</button>,
-}));
 vi.mock("@/components/ShipPlacement", () => ({
   ShipPlacement: ({ onConfirm }: { onConfirm: () => void }) => (
     <div data-testid="ship-placement" onClick={onConfirm}>
@@ -51,20 +34,22 @@ vi.mock("@/hooks/useStartGame", () => ({
   useStartGame: () => ({
     startGame: vi.fn(),
     stage: "idle",
+    status: "",
     error: null,
     gameAccountAddress: null,
     opponentAddress: null,
-    walletConnected: true,
+    commitment: null,
   }),
 }));
 vi.mock("@/hooks/useJoinGame", () => ({
   useJoinGame: () => ({
     joinGame: vi.fn(),
     stage: "idle",
+    status: "",
     error: null,
     gameAccountAddress: null,
     starterAddress: null,
-    walletConnected: true,
+    commitment: null,
   }),
 }));
 
@@ -80,7 +65,6 @@ describe("AppContent", () => {
     render(<AppContent />);
 
     expect(screen.getByText("Miden Battleship")).toBeInTheDocument();
-    expect(screen.getByText("Connect Wallet")).toBeInTheDocument();
     expect(screen.getByTestId("lobby")).toBeInTheDocument();
   });
 
@@ -102,7 +86,7 @@ describe("AppContent", () => {
     expect(screen.getByText(/syncing\.\.\./)).toBeInTheDocument();
   });
 
-  it("shows loading message and wallet button during initialization", () => {
+  it("shows loading message during initialization", () => {
     vi.mocked(useMiden).mockReturnValue({
       client: null,
       isReady: false,
@@ -119,7 +103,6 @@ describe("AppContent", () => {
     expect(
       screen.getByText(/Initializing Miden client/),
     ).toBeInTheDocument();
-    expect(screen.getByText("Connect Wallet")).toBeInTheDocument();
     expect(screen.getByText("Miden Battleship")).toBeInTheDocument();
   });
 

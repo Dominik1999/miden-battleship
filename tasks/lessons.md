@@ -127,3 +127,27 @@
 **Fix:** Added `pollSuppressedRef` guard that immediately prevents in-flight poll sync() calls from completing when entering the consume flow. Set the guard BEFORE clearing the interval, since clearInterval can't cancel an already-running async sync.
 
 **Key insight:** `sync_height` is a one-way ratchet — it never goes backward. Any sync() call that advances it past a not-yet-committed note permanently hides that note. When submitting notes via wallet adapter and waiting for them to appear, ALL other sync sources must be suppressed.
+
+## Never edit frontend source while a browser E2E run is in progress
+
+**Date:** 2026-10-07
+
+**Problem:** During the two-browser testnet game (Playwright profiles on the Vite dev server), I edited
+`AppContent.tsx` and the hooks to fix the block-height footer. Vite's Fast Refresh re-rendered the
+screens and reset the lobby state on both players at turn ~15. The on-chain accounts were fine but the
+UI session (addresses, role, commitment) only lives in React state, so the 25-minute game had to be
+restarted from scratch.
+
+**Rule:** Freeze every file under `frontend-template/` (and the `@masm` sources it imports) from the
+moment a browser game starts until it ends. Collect fixes in a list and apply them afterwards; if a fix
+is needed to continue, accept the restart consciously instead of hoping HMR preserves state.
+
+## Keep research output inside the repo, not in the session scratchpad
+
+**Date:** 2026-10-07
+
+**Problem:** The machine restarted mid-session and the subagent research reports in the session
+scratchpad were lost; the API knowledge had to be re-collected.
+
+**Rule:** Write anything a restart would cost time to reproduce (API reports, run logs, decisions) under
+`tasks/research/` and keep `tasks/todo.md` current at every milestone.

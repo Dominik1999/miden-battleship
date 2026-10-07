@@ -1,20 +1,18 @@
 import { type ReactNode } from "react";
 import { MidenProvider } from "@miden-sdk/react";
-import { MidenFiSignerProvider } from "@miden-sdk/miden-wallet-adapter";
-import "@miden-sdk/miden-wallet-adapter/styles.css";
-import { APP_NAME, MIDEN_RPC_URL, MIDEN_PROVER, MIDEN_NOTE_TRANSPORT_URL } from "@/config";
+import { MIDEN_RPC_URL, MIDEN_PROVER, MIDEN_PROVER_TIMEOUT_MS } from "@/config";
 
+/**
+ * No wallet / signer provider: game accounts use NoAuth and pay their own fees from the
+ * faucet, and the SDK's `MidenProvider` would never initialize behind a disconnected signer.
+ */
 export function AppProviders({ children }: { children: ReactNode }) {
   return (
-    <MidenFiSignerProvider appName={APP_NAME} autoConnect>
-      <MidenProvider
-        config={{ rpcUrl: MIDEN_RPC_URL, prover: MIDEN_PROVER, noteTransportUrl: MIDEN_NOTE_TRANSPORT_URL, autoSyncInterval: 0, proverTimeoutMs: 120_000 }}
-        loadingComponent={
-          <div className="loading">Loading Miden WASM...</div>
-        }
-      >
-        {children}
-      </MidenProvider>
-    </MidenFiSignerProvider>
+    <MidenProvider
+      config={{ rpcUrl: MIDEN_RPC_URL, prover: MIDEN_PROVER, autoSyncInterval: 0, proverTimeoutMs: MIDEN_PROVER_TIMEOUT_MS }}
+      loadingComponent={<div className="loading">Loading Miden WASM...</div>}
+    >
+      {children}
+    </MidenProvider>
   );
 }

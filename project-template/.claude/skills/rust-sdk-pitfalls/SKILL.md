@@ -1,144 +1,98 @@
 ---
 name: rust-sdk-pitfalls
-description: Critical pitfalls and safety rules for Miden Rust SDK development. Covers felt arithmetic security, comparison operators, argument limits, storage naming, no-std setup, asset layout, and P2ID roots. Use when reviewing, debugging, or writing Miden contract code.
+description: Critical pitfalls and safety rules for the MASM contracts and their miden-client 0.17 bindings. Covers modular felt arithmetic, the 16-element call window, stack hygiene, storage slot naming, advice-map payloads, output notes created by account code, fees, note discovery and dynamic linking. Use when reviewing, debugging, or writing contract code or integration code.
 ---
 
-# Miden SDK Pitfalls
+# MASM and Client Pitfalls
 
 ## P1: Felt Arithmetic is Modular (SECURITY CRITICAL)
 
-**Severity**: Critical — can cause loss of funds
+Field subtraction wraps around p = 2^64 - 2^32 + 1; `lt`/`gt` on raw felts are not integer comparisons. Use the u32 instruction family for counts, coordinates and bit fields.
 
-Felt subtraction wraps around the prime field modulus (p = 2^64 - 2^32 + 1) instead of panicking. Subtracting more than available silently produces a huge positive number.
+```masm
+# DANGEROUS
+dup push.GRID_SIZE lt assert          # felt comparison
 
-```rust
-// DANGEROUS — no check before subtraction
-let new_balance = current_balance - withdraw_amount;
-// If withdraw_amount > current_balance, new_balance ≈ 2^64 (wraps!)
-
-// SAFE — always validate first
-assert!(current_balance.as_u64() >= withdraw_amount.as_u64(),
-        "Insufficient balance");
-let new_balance = current_balance - withdraw_amount;
+# SAFE — assert_in_bounds in battleship_account.masm
+u32assert2.err=ERR_ROW_OUT_OF_BOUNDS
+dup push.GRID_SIZE u32lt assert.err=ERR_ROW_OUT_OF_BOUNDS
 ```
 
-**Rule**: ALWAYS check `.as_u64()` values before any Felt subtraction.
+**Rule**: `u32assert` an input before any `u32lt`/`u32lte`/`u32shr`/`u32and`; never subtract without a prior bound check.
 
-## P2: Felt Comparison Operators Are Misleading for Quantity Logic
+## P2: The 16-Element Call Window
 
-**Severity**: High — silently produces incorrect results
+`call` exposes exactly 16 stack elements to the callee and expects 16 back. Arguments that do not fill the window must be padded (`pad(n)` in the doc comments), and the caller must `dropw` the returned padding.
 
-`<`, `>`, `<=`, `>=` on Felt values compare field elements, which differs from natural number ordering. In protocol-level code working with field elements, these comparisons may be intentional. For business logic (balances, amounts, counts), the results are misleading.
+```masm
+# WRONG — 11 arguments, no padding: the callee reads garbage
+call.battleship::process_shot
 
-```rust
-// MISLEADING for business logic — compares field elements
-if balance > threshold { ... }
-
-// CORRECT for business logic — compare as integers
-if balance.as_u64() > threshold.as_u64() { ... }
+# CORRECT — shot_note.masm
+padw push.0                           # pad(5)
+... push the 11 arguments ...
+call.battleship::process_shot
+dropw dropw dropw dropw               # drop the 16 returned elements
 ```
 
-**Rule**: For quantity/business logic, ALWAYS convert to `.as_u64()` before using comparison operators.
+A mistake here surfaces as a wrong-phase/wrong-turn assertion far from the real bug: check the window first.
 
-## P3: Function Argument Limit (4 Words / 16 Felts)
+## P3: Stack Hygiene
 
-**Severity**: Medium — causes compilation errors
+Every `@account_procedure` must end with `exec.sys::truncate_stack`; every script must leave `[pad(16)]`. Keep the `# => [...]` comments exact — they are the only type system MASM has, and the reviewer reads them.
 
-Functions can receive at most 4 Words (16 Felts) as arguments.
+## P4: Storage Slot Naming
 
-```rust
-// PROBLEM — too many arguments
-fn process(a: Word, b: Word, c: Word, d: Word, e: Word) { ... } // > 4 Words!
+Slot names are arbitrary strings, but three places must agree: the `word("...")` constants in the MASM, `all_storage_slots()` in `battleship.rs`, and `SLOT_*` in `frontend-template/src/config.ts`. A mismatch is a runtime "slot not found" or a silent zero read, not a compile error.
 
-// SOLUTION — pass fat types by reference
-fn process(a: &Word, b: &Word, c: &Word, d: &Word, e: &Word) { ... }
-```
+Current pattern: `miden_battleship_account::battleship_account::<slot>`.
 
-## P4: Storage Slot Naming Convention
+## P5: Advice Map Payloads
 
-**Severity**: Medium — causes silent zero returns in tests
+A transaction script argument is one word. Larger inputs go through the advice map: insert `(key, payload)` and pass `key` as the script arg; the script loads it with `adv.push_mapvaln` and `mem::pipe_words_to_memory` (word-aligned destination, payload length a multiple of 4).
 
-Storage slot names follow a strict pattern. Getting it wrong returns zero silently.
+The setup script does **not** check that `key` is a hash of the payload: the account owner supplies both. Any word works (random in the browser, `Hasher::hash_elements(payload)` in Rust).
 
-**Pattern**: `miden::component::[snake_case(package)]::[field_name]`
+## P6: Output Notes Created by Account Code
 
-**Conversion rule**: Replace `:` and `-` with `_` in the package name from `[package.metadata.component] package = "..."`.
+When a procedure calls `output_note::create`, the executor must know the output note's script:
+- MockChain: `MockTransactionBuilder::add_note_script(result_script)` or `expected_output_note(RawOutputNote::Full(note))`
+- Client: `TransactionRequestBuilder::expected_output_recipients([recipient])`
 
-| Package in Cargo.toml | Field | Storage Slot Name |
-|----------------------|-------|-------------------|
-| `miden:counter-account` | `count_map` | `miden::component::miden_counter_account::count_map` |
-| `miden:bank-account` | `balances` | `miden::component::miden_bank_account::balances` |
-| `miden:bank-account` | `initialized` | `miden::component::miden_bank_account::initialized` |
+Without it the transaction fails with a "not found in data store" style error. The consumer can only declare the recipient if it knows the serial number and script root — which is why the shot note carries both.
 
-## P5: No-std Environment
+## P7: Fees
 
-**Severity**: Medium -- causes compilation errors
+Every transaction pays `base_fee * (ilog2(cycles) + 1)` in the fee asset; `NoAuth` pays from the vault. Consequences:
+- A fresh account must receive the fee asset *before* its first transaction (faucet P2ID note), and that first transaction consumes the note and deploys the account.
+- MockChain tests use `MockChain::builder().verification_base_fee(100)` and fund accounts with `with_assets([FungibleAsset::new(fee_faucet_id(), amount)?])`; with base fee 0 a transaction that changes nothing fails with "neither changed the account state, nor consumed any notes".
+- Testnet: ~105 base units per battleship transaction, 10,000 per faucet claim.
 
-All contract code must be `#![no_std]`. Forgetting this or using std types causes build failures.
+## P8: Note Discovery
 
-**Required at the top of every contract file:** See any contract in [contracts/](../../../contracts/) for the correct pattern (`#![no_std]` + `#![feature(alloc_error_handler)]`).
+A note reaches a client through its tag. Use `NoteTag::with_account_target(recipient)` and the recipient finds it with `sync_state()` + `get_input_notes(NoteFilter::Committed)` — no `add_note_tag` call is needed. But:
+- One client tracking both players' accounts never sees a component-created note (the result note) of one account as an input note of the other. One store per player.
+- A note published from the wrong account has the wrong `sender`, and `assert_sender_is_opponent` rejects it on consumption.
 
-**For heap allocation (Vec, String, Box):**
-```rust
-extern crate alloc;
-use alloc::vec::Vec;
-```
+## P9: Dynamic Linking
 
-## P6: Asset Word Layout
+Note and tx scripts must be compiled with the *same* component code that is installed on the account (`CodeBuilder::with_dynamically_linked_package(&component_code)`). Compiling the component twice from the same source gives the same roots, but always link the `component_code` from the `BattleshipScripts` you deploy with; the browser caches one "library" component for this reason (`ContractCompiler`).
 
-**Severity**: Medium — creates invalid assets
+## P10: Error Messages are Matched Verbatim
 
-Fungible assets have a specific Word layout. Getting the order wrong creates invalid assets or reads wrong amounts.
-
-```
-Asset Word: [amount, 0, faucet_suffix, faucet_prefix]
-              [0]   [1]      [2]            [3]
-```
-
-```rust
-// Reading amount from an asset
-let amount = asset.inner[0];
-
-// Constructing asset key for storage (including faucet identity)
-let key = Word::from([
-    depositor.prefix,
-    depositor.suffix,
-    asset.inner[3],  // faucet prefix
-    asset.inner[2],  // faucet suffix
-]);
-```
-
-## P7: P2ID Note Root Hardcoding
-
-**Severity**: Low-Medium — breaks after miden-standards updates
-
-Creating P2ID output notes requires the MAST root digest of the P2ID script. This is typically hardcoded as a constant.
-
-For any note that is being created within the compiler code, the MAST root digest is needed. Below you find the example of a P2ID note
-
-```rust
-fn p2id_note_root() -> Digest {
-    Digest::from_word(Word::new([
-        Felt::from_u64_unchecked(13362761878458161062),
-        Felt::from_u64_unchecked(15090726097241769395),
-        Felt::from_u64_unchecked(444910447169617901),
-        Felt::from_u64_unchecked(3558201871398422326),
-    ]))
-}
-```
-
-**Risk**: If miden-standards updates the P2ID script, this digest becomes invalid and withdrawals silently fail.
-
-**Mitigation**: Use `P2idNote::script_root()` from miden-standards if available, or verify the hardcoded root matches the current version after dependency updates.
+`assert_masm_error(result, "shot turn does not match the expected turn")` compares the message with `MasmError::matches_execution_error`. Changing an `ERR_...` string without updating the test (or the frontend's error handling) breaks the test suite, not the contract.
 
 ## Quick Reference
 
 | Pitfall | One-Line Rule |
 |---------|--------------|
-| P1 Felt arithmetic | Always `.as_u64()` before subtraction |
-| P2 Felt comparison | Always `.as_u64()` for `<` `>` `<=` `>=` in business logic |
-| P3 Arg limit | Max 4 Words per function — pass by reference |
-| P4 Storage names | `miden::component::pkg_name::field` (underscores) |
-| P5 No-std | `#![no_std]` + `#![feature(alloc_error_handler)]` |
-| P6 Asset layout | `[amount, 0, suffix, prefix]` |
-| P7 P2ID root | Verify digest after dependency updates |
+| P1 Felt arithmetic | `u32assert` first, then `u32lt`/`u32lte`; never raw `lt` or unchecked `sub` |
+| P2 Call window | pad to 16 on entry, `dropw` x4 after `call` |
+| P3 Stack hygiene | `exec.sys::truncate_stack`; keep `# => [...]` exact |
+| P4 Slot names | MASM, `battleship.rs`, `config.ts` must agree |
+| P5 Advice map | key as script arg, payload word-aligned, no preimage check |
+| P6 Output notes | declare the result note's script/recipient to the executor |
+| P7 Fees | fund before the first tx; MockChain base fee 100 |
+| P8 Discovery | account-target tags, one client per player |
+| P9 Linking | link the deployed component code into every script |
+| P10 Errors | tests match `ERR_...` messages verbatim |

@@ -290,11 +290,14 @@ function SendButton({ from, to, assetId, amount }) {
 ### Local Keystore (Default)
 No signer provider needed. Keys are managed in the browser via IndexedDB.
 
-### External Signers
-Wrap MidenProvider with a signer provider. Three pre-built options:
+### This App: No Signer at All
+Miden Battleship uses no signer provider. Its game accounts are public `NoAuth` accounts (battleship component + `BasicWallet`) that are funded from the faucet and pay their own fees, so every transaction is submitted directly from the raw client (`submitNewTransaction` / `submitNewTransactionWithProver`) with no popup or signature. `src/providers.tsx` renders `MidenProvider` alone; `MidenProvider` never initializes behind a signer provider that is not connected, so do not wrap it in one unless the app really needs user-held keys.
+
+### External Signers (other apps)
+Wrap MidenProvider with a signer provider. Pre-built options:
 - `ParaSignerProvider` from `@miden-sdk/para` — EVM wallets
 - `TurnkeySignerProvider` from `@miden-sdk/miden-turnkey-react` — passkey auth
-- `MidenFiSignerProvider` from `@miden-sdk/wallet-adapter-react` — MidenFi wallet
+- the MidenFi wallet adapter package — MidenFi browser extension
 
 ```tsx
 // Example: Para signer wrapping MidenProvider
@@ -328,12 +331,24 @@ toBech32AccountId("0x1234...");       // "miden1qy35..."
 
 ```tsx
 const client = useMidenClient(); // throws if not ready
-const { runExclusive } = useMiden();
+const { runExclusive, prover } = useMiden();
 
 // For operations not covered by hooks:
 await runExclusive(async (client) => {
   const header = await client.getBlockHeaderByNumber(100);
 });
+```
+
+Miden Battleship does all of its writes this way: `useGameContext()` bundles the client, the MASM `ContractCompiler` (`client.createCodeBuilder()`) and the prover into a `GameContext`, and the flow functions in `src/lib/game.ts` run inside `runExclusive`. Compiling contracts at runtime:
+
+```tsx
+const builder = await client.createCodeBuilder();
+const code = builder.compileAccountComponentCodeWithPath("battleship::account", masmSource);
+const component = AccountComponent.compile(code, storageSlots).withSupportsAllTypes();
+const linked = await client.createCodeBuilder();
+linked.linkDynamicAccountComponentCode(component.componentCode());
+const noteScript = linked.compileNoteScript(noteSource);
+const txScript = linked.compileTxScript(txSource);
 ```
 
 ## Type Imports

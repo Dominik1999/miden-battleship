@@ -30,6 +30,7 @@ export function createMockGameStorage(opts: {
   shipsHitCount: number;
   totalShotsReceived: number;
   boardCells?: Map<string, number>;
+  revealStatus?: [number, number];
 }) {
   const gameConfig = mockWord([10n, 17n, BigInt(opts.phase), BigInt(opts.expectedTurn)]);
   const opponent = mockWord([0n, 0n, BigInt(opts.shipsHitCount), BigInt(opts.totalShotsReceived)]);
@@ -39,25 +40,33 @@ export function createMockGameStorage(opts: {
     "miden_battleship_account::battleship_account::opponent": opponent,
   };
 
-  // Pack board cells into per-row words matching how useBoardState reads them.
-  // Each row packs cell values as 3-bit fields: packed |= (cellState << (col * 3))
-  if (opts.boardCells) {
-    const rowPacked = new Map<number, bigint>();
-    for (const [key, value] of opts.boardCells) {
-      const [rowStr, colStr] = key.split(",");
-      const row = parseInt(rowStr);
-      const col = parseInt(colStr);
-      const current = rowPacked.get(row) ?? 0n;
-      rowPacked.set(row, current | (BigInt(value) << (BigInt(col) * 3n)));
-    }
-    for (const [row, packed] of rowPacked) {
-      const slotName = `miden_battleship_account::battleship_account::board_row_${row}`;
-      slotMap[slotName] = mockWord([packed, 0n, 0n, 0n]);
-    }
+  if (opts.revealStatus) {
+    slotMap["miden_battleship_account::battleship_account::reveal_status"] = mockWord([
+      BigInt(opts.revealStatus[0]),
+      BigInt(opts.revealStatus[1]),
+      0n,
+      0n,
+    ]);
+  }
+
+  // Pack board cells into per-row map entries matching how board.ts reads them:
+  // key [0, 0, 0, row] -> [packed_row, 0, 0, 0], packed |= (cellState << (col * 3)).
+  const rowPacked = new Map<number, bigint>();
+  for (const [key, value] of opts.boardCells ?? []) {
+    const [rowStr, colStr] = key.split(",");
+    const row = parseInt(rowStr);
+    const col = parseInt(colStr);
+    const current = rowPacked.get(row) ?? 0n;
+    rowPacked.set(row, current | (BigInt(value) << (BigInt(col) * 3n)));
   }
 
   return {
-    getItem: vi.fn((slotName: string) => slotMap[slotName] ?? null),
+    getItem: vi.fn((slotName: string) => slotMap[slotName] ?? undefined),
+    getMapItem: vi.fn((slotName: string, key: { toU64s(): ArrayLike<bigint> }) => {
+      if (slotName !== "miden_battleship_account::battleship_account::my_board") return undefined;
+      const packed = rowPacked.get(Number(key.toU64s()[3]));
+      return packed === undefined ? undefined : mockWord([packed, 0n, 0n, 0n]);
+    }),
   };
 }
 
@@ -69,6 +78,7 @@ export function createMockGameAccount(opts: {
   shipsHitCount?: number;
   totalShotsReceived?: number;
   boardCells?: Map<string, number>;
+  revealStatus?: [number, number];
 }) {
   const storage = createMockGameStorage({
     phase: opts.phase ?? 2,
@@ -76,6 +86,7 @@ export function createMockGameAccount(opts: {
     shipsHitCount: opts.shipsHitCount ?? 0,
     totalShotsReceived: opts.totalShotsReceived ?? 0,
     boardCells: opts.boardCells,
+    revealStatus: opts.revealStatus,
   });
 
   return {

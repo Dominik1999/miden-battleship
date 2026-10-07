@@ -5,8 +5,8 @@ import { midenVitePlugin } from "@miden-sdk/vite-plugin";
 
 /**
  * Vite plugin to suppress the Dexie version-conflict throw inside the SDK.
- * The MidenFi wallet extension injects Dexie 4.0.8 into the page via
- * Symbol.for("Dexie"), which conflicts with the SDK's bundled Dexie 4.4.2.
+ * The MidenFi wallet extension injects its own Dexie into the page via
+ * Symbol.for("Dexie"), which conflicts with the SDK's inlined Dexie 4.4.2.
  * This plugin rewrites the `throw` into a `console.warn` so the SDK still
  * initializes correctly.
  */
@@ -25,6 +25,9 @@ function dexieConflictSuppressor(): Plugin {
   };
 }
 
+/** MASM contract sources live in the sibling contracts project and are imported with `?raw`. */
+export const MASM_DIR = path.resolve(__dirname, "../project-template/contracts/masm");
+
 export default defineConfig({
   base: process.env.GITHUB_ACTIONS ? "/miden-battleship/" : "/",
   plugins: [dexieConflictSuppressor(), react(), midenVitePlugin()],
@@ -32,6 +35,13 @@ export default defineConfig({
     dedupe: ["react", "react-dom", "react/jsx-runtime"],
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@masm": MASM_DIR,
+    },
+  },
+  server: {
+    fs: {
+      // Allow the dev server to serve the MASM sources from outside the project root.
+      allow: [path.resolve(__dirname), MASM_DIR],
     },
   },
 });

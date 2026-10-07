@@ -1,18 +1,21 @@
-# Miden Frontend App
+# Miden Battleship Frontend
 
-React 19 + TypeScript + Vite frontend for the Miden blockchain.
+React 19 + TypeScript + Vite 6 frontend for Miden Battleship on testnet, built on `@miden-sdk/react` 0.17.0 and `@miden-sdk/miden-sdk` 0.17.1.
 
 ## Project Structure
 
-- `src/` — React application source
-- `src/components/` — UI components (Counter, AppContent)
-- `src/hooks/` — Custom hooks (useIncrementCounter)
-- `src/lib/` — Shared utilities
-- `src/__tests__/` — Test infrastructure (mocks, fixtures, patterns)
-- `src/components/__tests__/` — Component tests
-- `vite.config.ts` — Vite config with midenVitePlugin() from @miden-sdk/vite-plugin
-- `vitest.config.ts` — Vitest test runner config
-- `package.json` — Dependencies: @miden-sdk/react, @miden-sdk/miden-sdk
+- `src/lib/masmSources.ts` — `?raw` imports of the MASM contracts through the `@masm` alias (`../project-template/contracts/masm`, see `vite.config.ts` and `vitest.config.ts`)
+- `src/lib/contracts.ts` — `ContractCompiler`: compiles the component and scripts with the web SDK's `CodeBuilder`, caches the linked component, exposes note script roots
+- `src/lib/game.ts` — client-level flow (fund, setup, handshake, shots, results, reveal); mirrors `project-template/integration/src/bin/validate_testnet.rs`
+- `src/lib/notes.ts` — payload/storage builders, note and account construction, direct submission
+- `src/lib/funding.ts` — faucet HTTP API client (proof of work), top-up policy
+- `src/lib/board.ts`, `src/lib/gameplay.ts` — board packing, enemy board, turn arithmetic
+- `src/hooks/` — `useStartGame`, `useJoinGame`, `useGameplaySync`, `useFireShot`, `useGameState`, `useBoardState`, `useGameContext`
+- `src/components/` — `AppContent` (screen state machine), `LobbyScreen`, `ShipPlacement`, `WaitingScreen`, `GamePlay`, `GameBoard`, `Cell`, `GameStatus`
+- `src/config.ts` — storage slot names (must match `battleship_account.masm`), note sizes, timing, fee and faucet constants
+- `src/providers.tsx` — `MidenProvider` only (no signer provider)
+- `src/__tests__/mocks/` — `miden-sdk.ts` (WASM types as plain classes) and `miden-sdk-react.ts` (hooks); `src/__tests__/fixtures/battleship.ts` — mock game account storage
+- `vite.config.ts` — `midenVitePlugin()`, `@`/`@masm` aliases, `server.fs.allow` for the contracts directory, a Dexie duplicate-version suppressor
 
 ## Build, Dev & Test
 
@@ -20,209 +23,110 @@ React 19 + TypeScript + Vite frontend for the Miden blockchain.
 yarn dev             # Start dev server (Vite)
 yarn build           # Type check + production build (tsc -b && vite build)
 yarn lint            # ESLint
-yarn test            # Run all tests once (vitest --run)
-yarn test:watch      # Run tests in watch mode (vitest)
-yarn test:coverage   # Run tests with coverage report
+yarn test            # Run all tests once (vitest --run, 54 tests)
+yarn test:watch      # Watch mode
+yarn test:coverage   # Coverage report
 ```
 
-Type checking alone:
-```
-npx tsc -b --noEmit
-```
+Type checking alone: `npx tsc -b --noEmit`
 
-## SDK Choice: React SDK over Raw WebClient
+## No Wallet, No Signer
 
-ALWAYS prefer `@miden-sdk/react` hooks over raw `@miden-sdk/miden-sdk` WebClient methods.
-Only use WebClient directly via `useMidenClient()` for operations not covered by hooks.
+Game accounts are public accounts with the battleship component, `BasicWallet` and `NoAuth` (`createGameAccount` in `src/lib/notes.ts`). They are funded from the public faucet and pay their own fees, so every transaction is submitted directly (`submitNewTransaction` / `submitNewTransactionWithProver`) with no popup. Do not add a signer provider: `MidenProvider` never initializes behind a disconnected signer provider, and the game accounts need none.
 
-### Setup (main.tsx or App.tsx)
+`main.tsx` calls `clearMidenStorage()` on every page load, so each session starts from an empty IndexedDB; a game does not survive a reload.
+
+## SDK Usage
+
+The React hooks cover reads: `useAccount(address)` for storage (`useGameState`, `useBoardState`), `useSyncState`. Everything that writes goes through the raw client inside `runExclusive`:
+
 ```tsx
-import { MidenProvider } from "@miden-sdk/react";
-import { MidenFiSignerProvider } from "@miden-sdk/miden-wallet-adapter";
-
-<MidenFiSignerProvider appName="My App" autoConnect>
-  <MidenProvider config={{ rpcUrl: "testnet", prover: "testnet" }}>
-    <App />
-  </MidenProvider>
-</MidenFiSignerProvider>
+const { runExclusive, context } = useGameContext();   // client + ContractCompiler + prover
+await runExclusive(() => publishShot(context(), myAddress, defenderAddress, row, col, turn));
 ```
 
-### Query Hooks
-Each returns its own result shape plus `isLoading`, `error`, `refetch`:
-```tsx
-const { wallets, faucets } = useAccounts();
-const { account, assets, getBalance } = useAccount(accountId);
-const { notes, consumableNotes } = useNotes();
-const { syncHeight, sync } = useSyncState();
-const { assetMetadata } = useAssetMetadata(faucetId);
-```
+`src/lib/game.ts` functions take a `GameContext` (`client`, `compiler`, `prover`, `onStatus`, `signal`) and narrow structural client interfaces (`GameClient`, `TxClient`) so tests can pass plain objects.
 
-### Mutation Hooks
-Each returns its own action function plus `isLoading`, `stage`, `error`, `reset`.
-Transaction stages: `idle → executing → proving → submitting → complete`
-```tsx
-const { createWallet } = useCreateWallet();
-const { send, stage } = useSend();
-const { consume } = useConsume();
-const { mint } = useMint();
-const { swap } = useSwap();
-const { execute } = useTransaction();  // arbitrary tx requests
-```
+Key SDK calls (all in `src/lib/`):
+- `client.createCodeBuilder()` -> `compileAccountComponentCodeWithPath`, `linkDynamicAccountComponentCode`, `compileNoteScript`, `compileTxScript`
+- `AccountComponent.compile(code, slots).withSupportsAllTypes()`; `new AccountBuilder(seed).accountType(Public).storageMode(public()).withComponent(c).withBasicWalletComponent().withNoAuthComponent().build()`
+- `client.feeAwareTransactionRequestBuilder(id)` + `withOwnOutputNotes` to publish notes; `new TransactionRequestBuilder().withCustomScript(..).withScriptArg(..).extendAdviceMap(..)` for setup; `withInputNotes` + `withExpectedOutputRecipients` to consume a shot; `client.newConsumeTransactionRequest` for plain consumes
+- `client.syncState()`, `client.getInputNotes(new NoteFilter(NoteFilterTypes.Committed))`, `client.getTransactions(TransactionFilter.ids([..]))`, `client.feeFaucetId()`
+- `NoteTag.withAccountTarget(id)` — the recipient discovers the note during sync; no tag registration
 
-### Token Amounts Are BigInt
-```tsx
-import { formatAssetAmount, parseAssetAmount } from "@miden-sdk/react";
-const display = formatAssetAmount(balance, 8);  // bigint → string
-const amount = parseAssetAmount("1.5", 8);       // string → bigint
-```
-
-For exhaustive hook API reference, read `node_modules/@miden-sdk/react/CLAUDE.md` and `node_modules/@miden-sdk/react/README.md`.
+For the full hook API, read `node_modules/@miden-sdk/react/README.md`.
 
 ## TDD Workflow
 
-When building features, follow this test-driven cycle:
-
 1. **Write a failing test** for the feature/component
-2. **Run tests** — confirm the test fails (red)
-3. **Implement** the minimum code to make the test pass
-4. **Run tests** — confirm all tests pass (green)
-5. **Refactor** if needed, re-run tests
-6. Type checking runs automatically after each edit (PostToolUse hook)
-7. Affected tests run automatically after each edit (PostToolUse hook)
+2. **Run tests** — confirm it fails (red)
+3. **Implement** the minimum code to pass
+4. **Run tests** — all green
+5. **Refactor**, re-run
+6. Type checking and affected tests run automatically after each edit (PostToolUse hooks)
 
 ### Test file conventions
 - Component tests: `src/components/__tests__/ComponentName.test.tsx`
 - Hook tests: `src/hooks/__tests__/hookName.test.ts`
-- Pattern references: `src/__tests__/patterns/` — copy and adapt these
+- Library tests: `src/lib/__tests__/module.test.ts` (pure functions and the `game.ts` flow against a fake client)
 
 ### Writing tests for Miden components
 ```tsx
-// 1. Mock the SDK at module level (always required)
 vi.mock("@miden-sdk/react", () => import("@/__tests__/mocks/miden-sdk-react"));
+vi.mock("@miden-sdk/miden-sdk", () => import("@/__tests__/mocks/miden-sdk"));
+import { useAccount } from "@miden-sdk/react";
+import { createMockGameStorage } from "@/__tests__/fixtures/battleship";
 
-// 2. Import hooks to override per-test
-import { useAccounts } from "@miden-sdk/react";
-
-// 3. Override in individual tests
-vi.mocked(useAccounts).mockReturnValue({ wallets: [], ... });
+vi.mocked(useAccount).mockReturnValue({ account: { storage: () => createMockGameStorage({ phase: 2, expectedTurn: 1, shipsHitCount: 0, totalShotsReceived: 0 }) }, ... });
 ```
-
-See `testing-patterns` skill for full mock factory reference and fixture data.
+See the `testing-patterns` skill for the mock and fixture reference.
 
 ## Verification Sequence
 
-Automated verification runs in layers (each catches different failure classes):
+1. **TypeScript type check** (auto, per edit)
+2. **Affected tests** (auto, per edit)
+3. **Full suite + lint + build** before declaring a task done: `yarn test && yarn lint && yarn build`
+4. **Browser verification** — two browser profiles (Playwright MCP or Claude in Chrome) against `yarn dev`, playing a full game on testnet; watch the console for `[Game]`, `[GameplaySync]`, `[Funding]` logs
 
-1. **TypeScript type check** (auto, per-edit) — catches type errors immediately
-2. **Affected tests** (auto, per-edit) — catches logic regressions from changes
-3. **Full test suite + type check + build** (auto, on task completion via Stop hook) — catches integration issues
-4. **Browser verification** (Playwright MCP / Claude in Chrome) — catches "compiles but doesn't work" failures
+## Contract Sources
 
-### Browser verification (when needed)
+The frontend compiles the contracts from source at runtime; there is nothing to copy. When `project-template/contracts/masm/` changes:
+- storage slot names -> `src/config.ts`
+- note storage layouts -> `src/config.ts` sizes, builders/parsers in `src/lib/notes.ts` and `src/lib/game.ts`
+- a new script -> `src/lib/masmSources.ts` and the kind maps in `src/lib/contracts.ts`
 
-Two tools are available for browser verification. Use whichever is appropriate:
-
-#### Playwright MCP (visual verification, no wallet)
-Configured in `.mcp.json`. Use for checking that the UI renders correctly, no console errors, layout looks right. Cannot interact with the MidenFi wallet extension.
-
-1. Start dev server: `yarn dev`
-2. Use Playwright MCP tools to navigate to `http://localhost:5173`
-3. Take a screenshot, check for render errors
-4. Check the browser console for errors
-
-#### Claude in Chrome (full verification, with wallet)
-Use for wallet-dependent features. Connects to the user's real browser where MidenFi is installed.
-
-1. Start Claude Code with `claude --chrome` (or run `/chrome` in session)
-2. Start dev server: `yarn dev`
-3. Navigate to `http://localhost:5173`
-4. Interact with wallet connect, transaction flows, etc.
-
-## Contract Artifact Handoff
-
-Frontend loads pre-compiled `.masp` packages from `public/packages/` at runtime.
-
-### Artifact location
-```
-public/packages/
-├── counter_account.masp    # Counter account component
-└── increment_note.masp     # Increment note script
-```
-
-### Building artifacts
-In the contract project (e.g., `project-template/`):
-```bash
-cargo miden build --release
-# Copy .masp files from contracts/*/target/miden/release/ to public/packages/
-```
-
-### Validate artifacts
-```bash
-.claude/hooks/check-artifacts.sh
-```
-
-### Failure recovery
-- **Missing artifacts**: Build contracts with `cargo miden build` or ask the PM to supply the `.masp` files
-- **Stale artifacts**: Rebuild and re-copy after contract changes
-- **Deserialization failure at runtime**: Version mismatch — rebuild contracts with the SDK version matching `@miden-sdk/miden-sdk` in `package.json`
+`.claude/hooks/check-artifacts.sh` predates the migration (it looks for `.masp` files) and is not used.
 
 ## Critical Pitfalls
 
-**WASM init must complete first**: Always use MidenProvider's `loadingComponent` or check `useMiden().isReady`. Components rendering before WASM init will crash.
+**wasm-bindgen moves handles passed by value.** A `Felt`, `Word`, `Note`, `AccountComponent` or script handle passed into a `FeltArray`, `Word.newFromFelts`, a builder or the client is consumed and cannot be reused. Keep field elements as `bigint[]` (`FeltValues`) and create fresh handles at the point of use with `felts()`; read `note.id()` before passing the note on; `ContractCompiler` hands out a fresh component/script per call and only caches a private library component.
 
-**Recursive WASM access crashes**: Never call client methods concurrently. Use `runExclusive()` from `useMiden()` for sequential execution. Built-in hooks handle this automatically.
+**No Poseidon2 hash in the web SDK.** The setup payload's advice-map key is a random word (`randomValues()`); commitments and game ids are random words too.
 
-**COOP/COEP headers required**: WASM SharedArrayBuffer needs `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy: require-corp` in vite.config.ts AND production server.
+**One client per player.** A client that tracks both game accounts never sees the result note one account creates as an input note of the other. Test with two browser profiles.
 
-**Token amounts are bigint, not number**: `send({ amount: 1000 })` will fail. Use `amount: 1000n` or `parseAssetAmount("10", 8)`.
+**Serialize WASM access.** Every client call runs inside `runExclusive` from `useMiden()`; `useGameplaySync` handles one note per 3 s tick and skips a tick while busy.
 
-## PM Workflow
+**Remote prover timing.** Proving a battleship transaction takes tens of seconds (setup ~31k, shot ~18k cycles); `proverTimeoutMs` is 120 s and `autoSyncInterval` is 0 (the hooks sync explicitly).
 
-For non-developer users building with this template:
+**COOP/COEP headers are required** for the threaded WASM: `midenVitePlugin()` in dev, `coi-serviceworker` from `index.html` on static hosting.
 
-1. Clone the repository and run `yarn install`
-2. Start Claude Code in the project directory
-3. Describe the app you want to build in natural language
-4. Claude will implement features using TDD — tests are written first, then code
-5. Automated hooks verify correctness at every step
-6. When Claude says "done", the Stop hook runs full tests + build automatically
-7. Review the app in the browser: `yarn dev` → open `http://localhost:5173`
-8. If using wallet features, install the MidenFi browser extension to test
-
-### Known limitations
-- **Visual correctness**: Automated tests verify structure and behavior, not visual appearance. Review the app in the browser for styling issues.
-- **Wallet extension**: Real wallet interactions require the MidenFi browser extension. Tests mock the wallet adapter.
-- **Network-dependent features**: Some features (syncing, transaction submission) require testnet connectivity.
+**Token amounts are bigint**: fee balances, faucet amounts and all storage values are `bigint`; format with `formatFeeBalance`.
 
 ## Miden Skills
 
-For Miden-specific guidance, Claude will auto-load these skills when relevant:
-- `react-sdk-patterns` — Complete React SDK hook API reference
-- `testing-patterns` — Test mock factory, fixtures, and TDD conventions
-- `frontend-pitfalls` — All frontend/WASM/browser pitfalls with safe/unsafe examples
+- `react-sdk-patterns` — React SDK hook API reference
+- `testing-patterns` — Test mocks, fixtures, and TDD conventions
+- `frontend-pitfalls` — Frontend/WASM/browser pitfalls
 - `miden-concepts` — Miden architecture from a developer perspective
 - `vite-wasm-setup` — Vite + WASM configuration, deployment headers, troubleshooting
-- `signer-integration` — External signer setup (Para, Turnkey, MidenFi)
-
-## General Frontend Skills (Recommended)
-
-For general React, TypeScript, and design capabilities, install these official skills alongside our Miden-specific ones:
-
-```bash
-# Vercel's React/design skills
-git clone https://github.com/vercel-labs/agent-skills.git
-# Install: react-best-practices, web-design-guidelines, composition-patterns
-
-# Anthropic's frontend design skill (Claude Code plugin)
-# See: https://github.com/anthropics/claude-code/tree/main/plugins/frontend-design
-```
+- `signer-integration` — External signers (not used by this app; read before adding one)
+- `frontend-source-guide` — Exploring the miden-client source for web-client methods
 
 ## Advanced Development
 
-For complex applications beyond basic hook usage (custom signers, raw WebClient, advanced note flows):
+For questions beyond the skills (exact `WebClient` method signatures, `CodeBuilder` options, request builder methods):
 
-1. Clone `miden-client` repo alongside this project (see `frontend-source-guide` skill)
-2. Use Plan Mode first — Claude explores React SDK source + examples before coding
-3. Claude uses sub-agents to explore repos efficiently without filling main context
-
-The basic skills cover ~80% of patterns. Source repos provide the remaining 20% for advanced builders.
+1. Read `node_modules/@miden-sdk/miden-sdk/dist/st/index.d.ts` (and `api-types.d.ts`) first — the web-client API is typed
+2. Clone `miden-client` at the matching version (see `frontend-source-guide`) for the Rust side of the bindings
+3. Use Plan Mode and sub-agents for exploration; keep `src/lib/game.ts` in step with `validate_testnet.rs`

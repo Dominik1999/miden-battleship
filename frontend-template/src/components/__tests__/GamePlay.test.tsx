@@ -1,7 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 
-// AudioContext stub for music auto-start
 function MockAudioContext() {
   const mockNode = { gain: { value: 0, setValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn(), linearRampToValueAtTime: vi.fn() }, connect: vi.fn().mockReturnThis(), disconnect: vi.fn(), type: "", frequency: { value: 0, setValueAtTime: vi.fn(), exponentialRampToValueAtTime: vi.fn() }, Q: { value: 0 }, start: vi.fn(), stop: vi.fn(), buffer: null };
   return {
@@ -18,119 +17,73 @@ function MockAudioContext() {
 vi.stubGlobal("AudioContext", MockAudioContext);
 
 vi.mock("@miden-sdk/react", () => import("@/__tests__/mocks/miden-sdk-react"));
+vi.mock("@miden-sdk/miden-sdk", () => import("@/__tests__/mocks/miden-sdk"));
+vi.mock("@/lib/game", () => ({ publishShot: vi.fn(async () => ({ noteId: "0x", resultSerial: [] })) }));
 
-const mockUseMidenFiWallet = vi.fn(() => ({
-  address: "mtst1wallet",
-  connected: true,
-  requestTransaction: vi.fn(),
-}));
-
-vi.mock("@miden-sdk/miden-wallet-adapter", () => ({
-  useMidenFiWallet: () => mockUseMidenFiWallet(),
-  Transaction: { createCustomTransaction: vi.fn() },
-}));
-vi.mock("@miden-sdk/miden-sdk", () => {
-  function MockFelt(this: { value: bigint }, v: bigint) { this.value = v; }
-  return {
-  Felt: MockFelt,
-  Word: {
-    newFromFelts: vi.fn(() => ({
-      toU64s: () => [0n, 0n, 0n, 0n],
-      toFelts: vi.fn(() => [{ value: 0n }, { value: 0n }, { value: 0n }, { value: 0n }]),
-    })),
-  },
-  FeltArray: vi.fn(() => ({ push: vi.fn() })),
-  Package: { deserialize: vi.fn(() => ({})) },
-  NoteScript: { fromPackage: vi.fn(() => ({})) },
-  Note: vi.fn(() => ({})),
-  NoteAssets: vi.fn(() => ({})),
-  NoteMetadata: vi.fn(() => ({ withAttachment: vi.fn(() => ({})) })),
-  NoteRecipient: vi.fn(() => ({})),
-  NoteInputs: vi.fn(() => ({})),
-  NoteTag: { withAccountTarget: vi.fn(() => ({ asU32: vi.fn(() => 0) })) },
-  NoteType: { Public: 0 },
-  NoteAttachment: { newNetworkAccountTarget: vi.fn(() => ({})) },
-  NoteExecutionHint: { always: vi.fn(() => ({})) },
-  OutputNote: { full: vi.fn(() => ({})) },
-  OutputNoteArray: vi.fn(() => ({})),
-  TransactionRequestBuilder: vi.fn(() => ({
-    withOwnOutputNotes: vi.fn(() => ({ build: vi.fn(() => ({})) })),
-  })),
-  AccountId: {
-    fromBech32: vi.fn(() => ({
-      prefix: vi.fn(() => ({ value: 0n })),
-      suffix: vi.fn(() => ({ value: 0n })),
-    })),
-  },
-};
-});
-vi.mock("@/lib/miden", () => ({
-  randomWord: vi.fn(() => ({ toFelts: vi.fn(() => [{ value: 0n }, { value: 0n }, { value: 0n }, { value: 0n }]) })),
-}));
-
-// Mock useGameplaySync to provide game state and board directly
 const mockUseGameplaySync = vi.fn();
-vi.mock("@/hooks/useGameplaySync", () => ({
-  useGameplaySync: (...args: unknown[]) => mockUseGameplaySync(...args),
-}));
+vi.mock("@/hooks/useGameplaySync", () => ({ useGameplaySync: (...args: unknown[]) => mockUseGameplaySync(...args) }));
 
 import { useAccount } from "@miden-sdk/react";
 import { createMockGameAccount } from "@/__tests__/fixtures/battleship";
 import { GamePlay } from "../GamePlay";
-
+import { buildEnemyBoard, nextShotTurn } from "@/lib/gameplay";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyAccount = any;
 
+const idleSync = { results: [], incomingShots: [], opponentGameOver: false, feeBalance: 9_000n, revealed: false, lastError: null };
+
 describe("GamePlay", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-
-    // useGameplaySync only handles sync+consume now, no state/board
-    mockUseGameplaySync.mockReturnValue({});
-
-    // useAccount is called for both player's own account and opponent
-    const myAccount = createMockGameAccount({
-      id: "mtst1a",
-      phase: 2,
-      expectedTurn: 2,
-      shipsHitCount: 0,
-      totalShotsReceived: 0,
-    });
-
-    vi.mocked(useAccount).mockReturnValue({
-      account: myAccount as AnyAccount,
-      assets: [],
-      isLoading: false,
-      error: null,
-      refetch: vi.fn(),
-      getBalance: vi.fn(() => 0n),
-    });
+    mockUseGameplaySync.mockReturnValue(idleSync);
+    const myAccount = createMockGameAccount({ id: "mtst1a", phase: 2, expectedTurn: 2, shipsHitCount: 0, totalShotsReceived: 0 });
+    vi.mocked(useAccount).mockReturnValue({ account: myAccount as AnyAccount, assets: [], isLoading: false, error: null, refetch: vi.fn(), getBalance: vi.fn(() => 0n) });
   });
 
-  it("renders two game boards", () => {
-    render(
-      <GamePlay accountA="mtst1a" accountB="mtst1b" playerRole="challenger" />,
-    );
+  it("renders two game boards and the fee balance", () => {
+    render(<GamePlay accountA="mtst1a" accountB="mtst1b" playerRole="challenger" commitment={null} />);
     expect(screen.getByText("Your Fleet")).toBeInTheDocument();
     expect(screen.getByText("Enemy Waters")).toBeInTheDocument();
+    expect(screen.getByText("0.009000 USDCx")).toBeInTheDocument();
   });
 
-  it("shows loading state when boards not ready", () => {
-    mockUseGameplaySync.mockReturnValue({});
-    vi.mocked(useAccount).mockReturnValue({
-      account: null,
-      assets: [],
-      isLoading: true,
-      error: null,
-      refetch: vi.fn(),
-      getBalance: vi.fn(() => 0n),
-    });
+  it("the challenger fires first; the acceptor waits for the first shot", () => {
+    render(<GamePlay accountA="mtst1a" accountB="mtst1b" playerRole="challenger" commitment={null} />);
+    expect(screen.getByText(/YOUR TURN/)).toBeInTheDocument();
+    render(<GamePlay accountA="mtst1a" accountB="mtst1b" playerRole="acceptor" commitment={null} />);
+    expect(screen.getByText(/Opponent's turn/)).toBeInTheDocument();
+  });
 
-    render(
-      <GamePlay accountA="mtst1a" accountB="mtst1b" playerRole="challenger" />,
-    );
+  it("shows victory when a result note reported game over", () => {
+    mockUseGameplaySync.mockReturnValue({ ...idleSync, opponentGameOver: true });
+    render(<GamePlay accountA="mtst1a" accountB="mtst1b" playerRole="challenger" commitment={null} />);
+    expect(screen.getByText(/VICTORY/)).toBeInTheDocument();
+  });
+
+  it("shows loading state when the board is not ready", () => {
+    vi.mocked(useAccount).mockReturnValue({ account: null, assets: [], isLoading: true, error: null, refetch: vi.fn(), getBalance: vi.fn(() => 0n) });
+    render(<GamePlay accountA="mtst1a" accountB="mtst1b" playerRole="challenger" commitment={null} />);
     expect(screen.getByText("Loading boards...")).toBeInTheDocument();
   });
+});
 
+describe("turn and enemy board helpers", () => {
+  it("challenger fires odd turns, acceptor even turns", () => {
+    expect(nextShotTurn("challenger", 0)).toBe(1);
+    expect(nextShotTurn("challenger", 3)).toBe(7);
+    expect(nextShotTurn("acceptor", 1)).toBe(2);
+    expect(nextShotTurn("acceptor", 4)).toBe(8);
+  });
+
+  it("builds the enemy board from resolved shots only", () => {
+    const board = buildEnemyBoard(new Map([
+      [1, { row: 0, col: 0, status: "hit" }],
+      [3, { row: 2, col: 2, status: "miss" }],
+      [5, { row: 4, col: 4, status: "pending" }],
+    ]));
+    expect(board[0][0].state).toBe(6);
+    expect(board[2][2].state).toBe(7);
+    expect(board[4][4].state).toBe(0);
+  });
 });

@@ -1,140 +1,77 @@
 ---
 name: local-node-validation
-description: Validates Miden contracts against a local node. Covers node setup, Rust binary adaptation, state verification, and troubleshooting. Use after MockChain tests pass to verify contracts work against a real node.
+description: Validates the battleship contracts against the real Miden testnet with the validate_testnet binary. Covers why MockChain is not enough, the two-client setup, faucet funding and fees, the verification checklist and troubleshooting. Use after MockChain tests pass and before frontend work; there is no local-node step with miden-node 0.17.
 ---
 
-# Local Node Validation
+# Testnet Validation (formerly local-node validation)
 
-Validates that contracts working in MockChain also work against a real Miden node. This catches known MockChain/live-node behavior gaps before they become harder to debug in production or the frontend.
+Validates that contracts working in MockChain also work against a real node. `miden-node` 0.17 has no `bundled` mode, so the gate runs against **testnet** instead of a local node: `integration/src/bin/validate_testnet.rs` plays a full game between two independent clients and asserts the on-chain state after every step. The frontend mirrors this binary step for step, so anything that fails here fails in the browser too.
 
 ## Why This Matters
 
 MockChain simplifies execution in ways that hide real-world failures:
 
-1. **No automatic block production** -- MockChain requires explicit `prove_next_block()`. A live node produces blocks on its own schedule.
-2. **No network transport** -- MockChain does not simulate the network transaction builder that handles network notes.
-3. **No RPC latency or timeouts** -- MockChain executes locally and instantly. Live nodes have gRPC round-trips with configurable timeouts.
-4. **No version/genesis validation** -- MockChain skips the `Accept` header version check that live nodes enforce.
-5. **Account update block numbers not tracked** -- MockChain returns chain tip instead of actual update block number.
-6. **No mempool or batching** -- MockChain does not simulate transaction queuing, batch formation, or block inclusion delays.
+1. **No block production delay** -- MockChain commits with `prove_next_block()`. On testnet a transaction commits seconds later and a note becomes visible only after sync.
+2. **No note discovery** -- in MockChain the test holds the `Note`. On testnet the recipient must find it through its account-target tag during `sync_state()`.
+3. **No proving** -- MockChain only executes. Testnet transactions are proven by the remote prover (tens of seconds each; 300 s timeout in `helpers.rs`).
+4. **No fees to earn** -- MockChain accounts are funded at genesis. On testnet a fresh account must claim USDCx from the faucet, and its first transaction (consuming the funding note) is what deploys it.
+5. **No version/protocol check** -- testnet enforces the client/node version compatibility and the protocol config (fee asset).
+6. **Two players, two stores** -- a single client tracking both accounts never sees a component-created note (the result note) from one account as an input note of the other.
 
 ## Prerequisites
 
-- [ ] MockChain integration tests pass: `cargo test -p integration --release`
-- [ ] `miden-node` installed: `cargo install miden-node --locked`
-- [ ] Working integration binary exists in `integration/src/bin/`
+- [ ] MockChain tests pass: `cargo test -p integration --release`
+- [ ] `curl` on `PATH` (faucet requests) and internet access to `rpc.testnet.miden.io`, the testnet prover and `https://faucet-api.testnet.miden.io`
+- [ ] The public faucet is up: `curl -sS "https://faucet-api.testnet.miden.io/pow?account_id=x&amount=1"` answers (a 400 is fine; 5xx means the faucet is down, not your change)
 
-## Step 1: Clean State and Start Local Node
-
-**Every node session must start from clean state.** Stale store files and keystore directories cause conflicts, deserialization errors, and misleading test results. Always wipe before starting.
+## Step 1: Run the validation binary
 
 ```bash
-# 1. Wipe all state from previous runs
-rm -rf local-node-data/ local-keystore/ local-store.sqlite3
-
-# 2. Bootstrap fresh node
-mkdir -p local-node-data
-miden-node bundled bootstrap \
-  --data-directory local-node-data \
-  --accounts-directory .
-
-# 3. Start node (keep running in separate terminal)
-miden-node bundled start \
-  --data-directory local-node-data \
-  --rpc.url http://0.0.0.0:57291
+cd project-template
+cargo run --bin validate_testnet --release
 ```
 
-**This clean-start sequence is mandatory every time.** Do not attempt to reuse state from a previous session.
+What it does (`validate_testnet.rs`):
+1. Compiles the MASM (`BattleshipScripts::compile()`) and prints the result note script root
+2. Creates two clients (`setup_testnet_client("validate-a")`, `"validate-b"`), each with its own SQLite store and keystore, and one fresh game account each
+3. Funds both from the faucet (`fund_from_faucet`): `/pow`, SHA-256 proof of work, `/get_tokens`, wait for the P2ID note, consume it (deploys the account)
+4. Setup on both accounts, challenge/accept handshake, 17 shots by A with B missing in between, `enter_reveal`, reveal notes, `mark_my_reveal`, cross verification
+5. Asserts phase, expected turn, commitments, counters and board cells after every step; prints `DONE: both accounts COMPLETE` with the remaining fee balances
 
-## Step 2: Adapt helpers.rs for Localhost
+A run takes about 8–9 minutes (see `tasks/research/validate-testnet-run.log` for a reference run: 510 s, ~105 base units per transaction).
 
-In `integration/src/helpers.rs`, add a `setup_local_client()` alongside the existing `setup_client()`:
+State lives in `testnet-store-validate-{a,b}.sqlite3` and `testnet-keystore-validate-{a,b}/` under `project-template/`. Every run creates new accounts, so an old store can be kept; delete the files if a store from an older SDK version fails to open.
 
-```rust
-pub async fn setup_local_client() -> Result<ClientSetup> {
-    let endpoint = Endpoint::new("http".into(), "localhost".into(), Some(57291));
-    let timeout_ms = 10_000;
-    let rpc_client = Arc::new(GrpcClient::new(&endpoint, timeout_ms));
-
-    let keystore_path = std::path::PathBuf::from("../local-keystore");
-    let keystore = Arc::new(FilesystemKeyStore::new(keystore_path)
-        .context("Failed to initialize local keystore")?);
-
-    let store_path = std::path::PathBuf::from("../local-store.sqlite3");
-
-    let client = ClientBuilder::new()
-        .rpc(rpc_client)
-        .sqlite_store(store_path)
-        .authenticator(keystore.clone())
-        .in_debug_mode(true.into())
-        .build()
-        .await
-        .context("Failed to build local Miden client")?;
-
-    Ok(ClientSetup { client, keystore })
-}
-```
-
-Use separate paths (`local-keystore/`, `local-store.sqlite3`) to avoid contaminating testnet state.
-
-## Step 3: Create Local Validation Binary
-
-Create `integration/src/bin/validate_local.rs` mirroring the existing testnet binary (`increment_count.rs`) but using `setup_local_client()`.
-
-The binary must:
-1. Call `setup_local_client()` instead of `setup_client()`
-2. Sync state: `client.sync_state().await?`
-3. Build contracts (same as existing binary)
-4. Create accounts, create notes, submit transactions
-5. Sync again after each transaction submission
-6. Wait for transaction inclusion (poll `sync_state` until account state updates)
-7. Verify final state matches MockChain test expectations
-8. Print clear pass/fail for each verification step
-
-Key differences from testnet binary:
-- Localhost endpoint (port 57291)
-- Separate keystore and store paths
-- Must handle block production timing (sync + wait between submissions)
-
-## Step 4: Run and Verify
-
-Ensure clean client state before running (the node should already be clean from Step 1):
-```bash
-rm -rf local-keystore/ local-store.sqlite3
-cargo run --bin validate_local --release
-```
-
-### Verification Checklist
+## Step 2: Verification Checklist
 
 - [ ] `sync_state()` succeeds (node reachable, no version mismatch)
-- [ ] Account creation succeeds (account appears after sync)
-- [ ] Note publication succeeds (transaction accepted by node)
-- [ ] Note consumption succeeds (state transitions as expected)
-- [ ] Final state matches MockChain test expectations
-- [ ] No RPC timeout errors
-- [ ] Node logs show no errors
+- [ ] Both faucet claims land and the funding notes are consumed (balances printed, ~9,895 after the deploy transaction)
+- [ ] Setup: phase `CHALLENGED`, game id, commitment and opponent stored
+- [ ] Handshake: B `ACTIVE` with expected turn 1, A `ACTIVE` with expected turn 2, commitments swapped
+- [ ] Each shot: the defender discovers the shot note, the shooter discovers the result note, the decoded result matches
+- [ ] After the 17th hit: B in `REVEAL`, 17 hits / 17 shots, cell (0,0) `HIT`, A cell (9,0) `MISS`
+- [ ] Reveal: both accounts `COMPLETE`
+- [ ] No prover timeouts, no `429` loops from the faucet
 
-## Step 5: Inspect Node Logs
+## Step 3: Adapting the binary
 
-Run the node with verbose logging:
+When the contracts change, change `validate_testnet.rs` with them: the flow helpers (`setup`, `send`, `consume`, `fire`, `reveal_note`) are thin wrappers over `helpers.rs` (`run_tx_script`, `publish_note`, `consume_notes`, `consume_shot_note`, `wait_for_note`). Keep an `ensure!` on the storage after every step; a step that only "does not error" proves nothing.
+
+For a manual check of the same flow, play the CLI from two terminals:
 ```bash
-RUST_LOG=info miden-node bundled start \
-  --data-directory local-node-data \
-  --rpc.url http://0.0.0.0:57291
+cargo run --bin battleship_cli --release -- --player alice --role challenger --game-id demo
+cargo run --bin battleship_cli --release -- --player bob --role acceptor --game-id demo
 ```
-
-Look for:
-- Transaction acceptance/rejection messages
-- Block production confirmations
-- Error or warning lines
 
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `Unavailable` RPC error | Node not running or wrong port | Start node, verify port 57291 |
-| Version mismatch error | Node and client crate versions differ | Rebuild node from same miden-node version as client deps |
-| Transaction rejected | Invalid proof or state | Check contract code, reset node data, try again |
-| Account not found after creation | Haven't synced | Call `sync_state()` after account creation |
-| Store errors or deserialization failures | Stale state from previous session | Wipe everything: `rm -rf local-node-data/ local-keystore/ local-store.sqlite3` and re-bootstrap |
-| Block not produced | Node produces blocks when transactions arrive | Submit a transaction; check `--block-producer.block-interval` setting |
+| `Unavailable` / connection error on sync | No network or testnet down | Check `https://status.testnet.miden.io`; retry |
+| Version or accept-header error on the first RPC | `miden-client` version does not match the node | Keep `integration/Cargo.toml` on the client version the testnet runs |
+| Faucet `5xx` or `/get_tokens` fails after a valid PoW | Faucet outage, not your change | Wait and retry; `request_faucet_tokens` retries 429 six times |
+| `timed out ... waiting for a consumable note` | Funding note not yet committed, or wrong faucet amount | Check the faucet note on midenscan; amount must be <= 10,000 |
+| `failed to prove transaction` / deadline | Remote prover overloaded | Retry; `PROVER_TIMEOUT` is 300 s |
+| `timed out ... waiting for a note` between players | Note tag or sender mismatch, or the note was published from the wrong account | Verify `NoteTag::with_account_target(target)` and that the publishing account is the sender the recipient expects |
+| MASM assertion in the executor | Contract rejected the step (phase, turn, sender) | Read the `ERR_...` message; reproduce in a failure test first |
+| Store fails to open / deserialization error | Store written by an older SDK | Delete `testnet-store-validate-*.sqlite3` and `testnet-keystore-validate-*/` |

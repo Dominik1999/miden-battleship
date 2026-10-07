@@ -7,6 +7,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      "@masm": path.resolve(__dirname, "../project-template/contracts/masm"),
     },
   },
   test: {
@@ -15,12 +16,5 @@ export default defineConfig({
     setupFiles: ["./vitest.setup.ts"],
     include: ["src/**/*.{test,spec}.{ts,tsx}"],
     passWithNoTests: true,
-    server: {
-      deps: {
-        // The wallet-adapter-reactui sub-package has incorrect exports in package.json.
-        // Tests mock the wallet adapter at the module level, so externalizing is safe.
-        external: [/@miden-sdk\/miden-wallet-adapter/],
-      },
-    },
   },
 });

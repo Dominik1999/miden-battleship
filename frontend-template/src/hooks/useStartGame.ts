@@ -1,461 +1,157 @@
 import { useState, useCallback, useEffect, useRef } from "react";
+import { AccountId, Address, NetworkId, type InputNoteRecord } from "@miden-sdk/miden-sdk";
+import { AUTO_SYNC_INTERVAL_MS } from "@/config";
 import {
-  useAccount,
-  useConsume,
-  useImportAccount,
-  useMiden,
-  useMidenClient,
-  useNotes,
-  useSyncState,
-} from "@miden-sdk/react";
-import { useMidenFiWallet } from "@miden-sdk/miden-wallet-adapter";
-import { AccountId, Address, Felt, NetworkId, NoteTag, NoteFilter, NoteFilterTypes } from "@miden-sdk/miden-sdk";
-import { randomWord } from "@/lib/miden";
-import {
-  loadPackage,
-  createGameAccount,
-  buildSetupInputs,
-  buildHandshakeInputs,
-  buildNote,
-  submitNoteDirect,
-} from "@/lib/notes";
-import {
-  SLOT_OPPONENT,
-  AUTO_SYNC_INTERVAL_MS,
-  NETWORK_SYNC_DELAY_MS,
-  CONSUME_MAX_RETRIES,
-  CONSUME_RETRY_DELAY_MS,
-} from "@/config";
-import type { ShipCell } from "@/types/game";
+  classifyNote,
+  consumeNote,
+  createAndFundGameAccount,
+  handshakeStorageFor,
+  hasSentNote,
+  parseHandshakeStorage,
+  pendingNotesFor,
+  publishGameNote,
+  randomValues,
+  readGameIdentity,
+  runSetup,
+  type FeltValues,
+  sync,
+} from "@/lib/game";
+import { useGameContext } from "@/hooks/useGameContext";
+import { readGameState } from "@/hooks/useGameState";
+import { PHASE_ACTIVE, PHASE_CREATED, type ShipCell } from "@/types/game";
 
 export type StartStage =
   | "idle"
-  | "loading"
-  | "creating-account"
+  | "preparing"
   | "waiting-for-opponent"
   | "completing"
-  | "syncing"
   | "ready"
   | "error";
 
 const log = (msg: string, ...args: unknown[]) =>
-  console.log(
-    `%c[StartGame] ${msg}`,
-    "color: #fa0; font-weight: bold",
-    ...args,
-  );
+  console.log(`%c[StartGame] ${msg}`, "color: #fa0; font-weight: bold", ...args);
 
-/** Reconstruct AccountId hex from prefix + suffix u64 values.
- *  AccountId is 15 bytes: 8-byte prefix + 7-byte suffix (last byte always 0x00).
- *  Hex format: "0x" + 16 prefix chars + 14 suffix chars = 32 chars total. */
-function accountIdHexFromU64s(prefix: bigint, suffix: bigint): string {
-  const hex =
-    "0x" +
-    prefix.toString(16).padStart(16, "0") +
-    suffix.toString(16).padStart(16, "0");
-  return hex.slice(0, 32);
-}
-
+/**
+ * Starter flow: create + fund a game account, share its address, wait for a challenge note,
+ * then set up the board (with the challenger's game id), accept the challenge and send the
+ * accept note. In contract terms the starter is the acceptor: the joiner fires first.
+ */
 export function useStartGame() {
   const [stage, setStage] = useState<StartStage>("idle");
+  const [status, setStatus] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
-  const [gameAccountAddress, setGameAccountAddress] = useState<string | null>(
-    null,
-  );
+  const [gameAccountAddress, setGameAccountAddress] = useState<string | null>(null);
   const [opponentAddress, setOpponentAddress] = useState<string | null>(null);
+  const [commitment, setCommitment] = useState<FeltValues | null>(null);
 
-  const {
-    address: walletAddress,
-    connected,
-    requestTransaction,
-  } = useMidenFiWallet();
-  const client = useMidenClient();
-  const { runExclusive } = useMiden();
-  const { sync } = useSyncState();
-  const { importAccount } = useImportAccount();
-  const { consume, isLoading: isConsuming } = useConsume();
+  const { runExclusive, context } = useGameContext();
+  const boardRef = useRef<{ cells: ShipCell[]; commitment: FeltValues } | null>(null);
+  const busyRef = useRef(false);
 
-  // Track game account to poll for opponent
-  const { account: gameAccount, refetch: refetchGame } = useAccount(
-    gameAccountAddress ?? "",
-  );
+  const fail = useCallback((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    log(`Failed: ${msg}`);
+    setError(msg);
+    setStage("error");
+  }, []);
 
-  // Track consumable notes for the game account
-  const { consumableNotes, notes: allNotes, refetch: refetchNotes } = useNotes(
-    gameAccountAddress ? { accountId: gameAccountAddress } : undefined,
-  );
-
-  // Track note IDs that existed before game creation so we only consume new ones
-  const preGameNoteIds = useRef<Set<string>>(new Set());
-
-  // Track note IDs we've already consumed (isConsumed() can lag behind)
-  const consumedNoteIds = useRef<Set<string>>(new Set());
-
-  // Guard against concurrent consumeNotes calls (double-click prevention)
-  const consumingRef = useRef(false);
-
-  // Store ship cells and packages for deferred handshake
-  const deferredRef = useRef<{
-    cells: ShipCell[];
-    commitment: Felt[];
-    setupPkg: Awaited<ReturnType<typeof loadPackage>>;
-    acceptPkg: Awaited<ReturnType<typeof loadPackage>>;
-  } | null>(null);
-
-  /**
-   * Step 1: Player places ships, then calls startGame.
-   * Creates game account, loads packages, returns game address.
-   */
   const startGame = useCallback(
     async (cells: ShipCell[]): Promise<string | null> => {
-      if (!walletAddress) {
-        setError("Wallet not connected");
-        setStage("error");
-        return null;
-      }
       setError(null);
-
+      setStage("preparing");
       try {
-        // Load packages
-        setStage("loading");
-        log("Loading .masp packages...");
-        const [battleshipPkg, setupPkg, , acceptPkg] = await Promise.all([
-          loadPackage("battleship_account.masp"),
-          loadPackage("setup_note.masp"),
-          loadPackage("challenge_note.masp"),
-          loadPackage("accept_note.masp"),
-        ]);
-
-        // Snapshot existing note IDs so we only consume new ones later
-        preGameNoteIds.current = new Set(
-          (allNotes ?? []).map((n) => n.id().toString()),
-        );
-        log(`Snapshotted ${preGameNoteIds.current.size} pre-existing note IDs`);
-
-        // Create game account with battleship component via WebClient
-        // Wrap in runExclusive to prevent concurrent WASM access
-        setStage("creating-account");
-        log("Creating game account...");
-        const accountAddress = await runExclusive(() =>
-          createGameAccount(client, battleshipPkg),
-        );
-        log(`Game account created: ${accountAddress}`);
-
-        // Note: account is already in local store from client.newAccount().
-        // importAccount({ type: "id" }) would fail because the account isn't
-        // on-chain yet — it only gets deployed on first transaction (consume).
-
-        // Register the tag so the client discovers notes targeted at this account during sync
-        const gameAccountId = AccountId.fromBech32(accountAddress);
-        const gameTag = NoteTag.withAccountTarget(gameAccountId);
-        log(`Registering tag ${gameTag.asU32()} for game account...`);
-        await runExclusive(() => client.addTag(gameTag.asU32().toString()));
-
-        // Prepare deferred data (game_id will come from the joiner's challenge note)
-        const commitment = randomWord();
-        const commitFelts = commitment.toFelts();
-
-        deferredRef.current = {
-          cells,
-          commitment: commitFelts,
-          setupPkg,
-          acceptPkg,
-        };
-
-        setGameAccountAddress(accountAddress);
+        const address = await runExclusive(() => createAndFundGameAccount(context(setStatus)));
+        const commit = randomValues();
+        boardRef.current = { cells, commitment: commit };
+        setCommitment(commit);
+        setGameAccountAddress(address);
+        setStatus("Share your game account address with your opponent.");
         setStage("waiting-for-opponent");
-        log("=== WAITING FOR OPPONENT ===");
-        log(`Game account: ${accountAddress}`);
-        log(`Wallet: ${walletAddress}`);
-        log(`Share the game account address with your opponent.`);
-
-        return accountAddress;
+        return address;
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        log(`Start failed: ${msg}`);
-        setStage("error");
-        setError(msg);
+        fail(err);
         return null;
       }
     },
-    [walletAddress, client, importAccount],
+    [runExclusive, context, fail],
   );
 
-  // Poll for opponent joining
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollCountRef = useRef(0);
-  // Guard: when true, poll syncs are suppressed even if a tick is already in flight.
-  // This prevents an in-flight sync() from advancing sync_height past the block
-  // where a wallet-adapter-submitted note lands (root cause of web-sdk#148).
-  const pollSuppressedRef = useRef(false);
-
+  // Poll until the handshake is complete. Every step is derived from on-chain state so the
+  // flow survives interruptions: CHALLENGED/CREATED → wait for the challenge note, set up the
+  // board and accept it; ACTIVE → send the accept note unless it was already sent.
   useEffect(() => {
-    if (stage !== "waiting-for-opponent" || !gameAccountAddress) return;
+    if ((stage !== "waiting-for-opponent" && stage !== "completing") || !gameAccountAddress) return;
+    const address = gameAccountAddress;
+    let stopped = false;
 
-    pollCountRef.current = 0;
-    pollSuppressedRef.current = false;
-    log(`Starting poll loop (every ${AUTO_SYNC_INTERVAL_MS / 1000}s) for game account: ${gameAccountAddress}`);
-
-    pollRef.current = setInterval(async () => {
-      if (pollSuppressedRef.current) return;
-      pollCountRef.current++;
-      const tick = pollCountRef.current;
+    const tick = async () => {
+      if (busyRef.current || stopped) return;
+      busyRef.current = true;
       try {
-        log(`[poll #${tick}] Syncing from network...`);
-        if (pollSuppressedRef.current) return; // check again before async sync
-        await sync();
-        if (pollSuppressedRef.current) return; // don't refetch if suppressed
-        log(`[poll #${tick}] Sync complete. Refetching account + notes...`);
-        refetchGame();
-        refetchNotes();
-      } catch (err) {
-        log(`[poll #${tick}] Poll error: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }, AUTO_SYNC_INTERVAL_MS);
+        const ctx = context(setStatus);
+        const me = AccountId.fromBech32(address);
+        const done = await runExclusive(async () => {
+          await sync(ctx);
+          const account = await ctx.client.getAccount(me);
+          if (!account) throw new Error("Game account not found in the local store");
+          let phase = readGameState(account.storage())?.phase ?? PHASE_CREATED;
 
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-        log("Poll loop stopped.");
+          if (phase < PHASE_ACTIVE) {
+            const feeFaucet = await ctx.client.feeFaucetId();
+            let challenge: InputNoteRecord | null = null;
+            for (const record of await pendingNotesFor(ctx, address)) {
+              const classified = await classifyNote(ctx, record, feeFaucet);
+              if (classified.kind === "challenge") {
+                challenge = record;
+                break;
+              }
+            }
+            if (!challenge) return false;
+            setStage("completing");
+            const board = boardRef.current;
+            if (!board) throw new Error("Board placement was lost");
+            const note = challenge.toNote();
+            const { gameId, sender, commitment: theirCommitment } = parseHandshakeStorage(note);
+            log(`Challenge from ${sender.toString()}, game id [${gameId.join(", ")}], commitment [${theirCommitment.join(", ")}]`);
+            if (phase === PHASE_CREATED) {
+              setStatus("Storing your board on-chain...");
+              await runSetup(ctx, address, gameId, sender, board.commitment, board.cells);
+            }
+            setStatus("Accepting the challenge...");
+            await consumeNote(ctx, address, note);
+            phase = PHASE_ACTIVE;
+          }
+
+          const identity = readGameIdentity((await ctx.client.getAccount(me)) ?? account);
+          if (!identity) throw new Error("Game account has no opponent after the handshake");
+          const opponent = Address.fromAccountId(identity.opponent).toBech32(NetworkId.testnet());
+          const board = boardRef.current;
+          if (!board) throw new Error("Board placement was lost");
+          if (!(await hasSentNote(ctx, "accept", opponent, identity.gameId))) {
+            setStage("completing");
+            setStatus("Sending the accept note...");
+            await publishGameNote(ctx, "accept", address, opponent, handshakeStorageFor(identity.gameId, me, board.commitment));
+          }
+          return opponent;
+        });
+        if (!done) return;
+        setOpponentAddress(done);
+        setStatus("Game ready!");
+        setStage("ready");
+      } catch (err) {
+        fail(err);
+      } finally {
+        busyRef.current = false;
       }
     };
-  }, [stage, gameAccountAddress, sync, refetchGame, refetchNotes]);
 
-  // Log note state changes
-  useEffect(() => {
-    if (stage !== "waiting-for-opponent") return;
-    log(`Notes update — all: ${allNotes?.length ?? 0}, consumable: ${consumableNotes?.length ?? 0}`);
-    if (allNotes && allNotes.length > 0) {
-      allNotes.forEach((n, i) => {
-        log(`  all[${i}]: id=${n.id().toString()}, consumed=${n.isConsumed()}, processing=${n.isProcessing()}, authenticated=${n.isAuthenticated()}`);
-      });
-    }
-    if (consumableNotes && consumableNotes.length > 0) {
-      consumableNotes.forEach((n, i) => {
-        const rec = n.inputNoteRecord();
-        log(`  consumable[${i}]: id=${rec.id().toString()}, consumed=${rec.isConsumed()}, processing=${rec.isProcessing()}`);
-      });
-    }
-  }, [stage, allNotes, consumableNotes]);
+    void tick();
+    const interval = setInterval(() => void tick(), AUTO_SYNC_INTERVAL_MS);
+    return () => {
+      stopped = true;
+      clearInterval(interval);
+    };
+  }, [stage, gameAccountAddress, runExclusive, context, fail]);
 
-  // Get NEW non-consumed, authenticated notes (exclude pre-game, already-consumed,
-  // and non-game notes like P2ID token transfers that target the wallet, not the game account).
-  const pendingNotes = (allNotes ?? []).filter(
-    (n) => {
-      if (n.isConsumed() || n.isProcessing() || !n.isAuthenticated()) return false;
-      if (preGameNoteIds.current.has(n.id().toString())) return false;
-      if (consumedNoteIds.current.has(n.id().toString())) return false;
-      // Filter by note input count: game notes have 10 (challenge/accept) inputs.
-      // P2ID notes and other non-game notes have different counts and would fail with
-      // "P2ID's target account address and transaction address do not match".
-      try {
-        const inputCount = n.details().recipient().storage().items().length;
-        return inputCount === 10;
-      } catch {
-        return false;
-      }
-    },
-  );
-
-  // Starter's consume flow (two separate transactions for phase transitions):
-  // 1. Read challenge note inputs to get joiner's address
-  // 2. Submit own setup note (places ships via wallet)
-  // 3. Consume ONLY the setup note (CREATED → CHALLENGED)
-  // 4. Consume ONLY the challenge note (CHALLENGED → ACTIVE)
-  // 5. Send accept note to joiner
-  const consumeNotes = useCallback(async () => {
-    if (consumingRef.current) {
-      log("consumeNotes already in progress — skipping duplicate call");
-      return;
-    }
-    if (
-      !gameAccountAddress ||
-      !walletAddress ||
-      !requestTransaction ||
-      !deferredRef.current ||
-      pendingNotes.length === 0
-    ) {
-      log("consumeNotes called but not ready");
-      return;
-    }
-    consumingRef.current = true;
-
-    // Suppress poll syncs immediately — an in-flight sync() could advance
-    // sync_height past the block where our setup note lands, making it
-    // permanently invisible to subsequent syncs (web-sdk#148 race).
-    pollSuppressedRef.current = true;
-
-    // Switch stage to prevent opponent detection effect from firing during consume
-    setStage("completing");
-
-    // Stop polling while consuming to prevent interference
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-      log("Stopped poll loop for consume flow.");
-    }
-
-    try {
-      // Step 1: Extract joiner info AND game_id from the challenge note
-      // Challenge note inputs: [0..3]=game_id, [4]=joiner_prefix, [5]=joiner_suffix, [6..9]=commitment
-      const challengeNote = pendingNotes[0];
-      const challengeNoteId = challengeNote.id().toString();
-      const noteInputs = challengeNote.details().recipient().storage().items();
-      const challengeGameId = [noteInputs[0], noteInputs[1], noteInputs[2], noteInputs[3]];
-      const joinerPrefix = noteInputs[4];
-      const joinerSuffix = noteInputs[5];
-      log(`Challenge note (${challengeNoteId}) gameId=[${challengeGameId.map(String)}], joiner prefix=${joinerPrefix}, suffix=${joinerSuffix}`);
-
-      const { cells, commitment, setupPkg, acceptPkg } = deferredRef.current;
-      const gameAccountId = AccountId.fromBech32(gameAccountAddress);
-
-      // Step 2: Submit our own setup note directly from the game account (no wallet popup).
-      log("Building starter setup note...");
-      const { note: setupNote, noteId: setupNoteId } = buildNote(
-        setupPkg,
-        buildSetupInputs(challengeGameId, joinerPrefix, joinerSuffix, commitment, cells),
-        gameAccountId,
-        gameAccountId,
-        gameAccountAddress,
-      );
-      log(`Setup note ID: ${setupNoteId}`);
-      log("Submitting setup note directly (no wallet popup)...");
-      await runExclusive(() =>
-        submitNoteDirect([setupNote], gameAccountId, client),
-      );
-
-      // Step 3: Wait for setup note to appear on-chain, then consume it ALONE
-      // Retry loop: sync + consume, because the note may not be on-chain yet
-      log(`=== CONSUMING SETUP NOTE (CREATED → CHALLENGED) ===`);
-      log(`  Setup note: ${setupNoteId}`);
-      for (let attempt = 1; attempt <= CONSUME_MAX_RETRIES; attempt++) {
-        const delay = attempt === 1 ? NETWORK_SYNC_DELAY_MS : CONSUME_RETRY_DELAY_MS;
-        log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Waiting ${delay / 1000}s then syncing...`);
-        await new Promise((r) => setTimeout(r, delay));
-        await sync();
-
-        // Diagnostic: dump what notes are in the local store after sync
-        try {
-          const allLocal = await client.getInputNotes(new NoteFilter(NoteFilterTypes.All));
-          const committedLocal = await client.getInputNotes(new NoteFilter(NoteFilterTypes.Committed));
-          log(`[diag] After sync — ALL notes in store: ${allLocal.length}, COMMITTED: ${committedLocal.length}`);
-          allLocal.forEach((n: { id: () => { toString: () => string }; isConsumed: () => boolean; isProcessing: () => boolean; isAuthenticated: () => boolean }, i: number) => {
-            log(`[diag]   [${i}] id=${n.id().toString()}, consumed=${n.isConsumed()}, processing=${n.isProcessing()}, auth=${n.isAuthenticated()}`);
-          });
-          log(`[diag] Looking for setup note: ${setupNoteId}`);
-          const match = allLocal.find((n: { id: () => { toString: () => string } }) => n.id().toString() === setupNoteId);
-          log(`[diag] Found in local store? ${match ? "YES" : "NO"}`);
-        } catch (diagErr) {
-          log(`[diag] Error querying local store: ${diagErr instanceof Error ? diagErr.message : String(diagErr)}`);
-        }
-
-        try {
-          const setupResult = await consume({ accountId: gameAccountAddress, notes: [setupNoteId] });
-          log(`Setup consume succeeded! TX: ${JSON.stringify(setupResult)}`);
-          consumedNoteIds.current.add(setupNoteId);
-          break;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Setup consume failed: ${msg}`);
-          if (attempt === CONSUME_MAX_RETRIES) throw err;
-        }
-      }
-
-      // Step 4: Wait for setup consume to propagate, then consume the challenge note ALONE
-      log(`=== CONSUMING CHALLENGE NOTE (CHALLENGED → ACTIVE) ===`);
-      log(`  Challenge note: ${challengeNoteId}`);
-      for (let attempt = 1; attempt <= CONSUME_MAX_RETRIES; attempt++) {
-        const delay = attempt === 1 ? NETWORK_SYNC_DELAY_MS : CONSUME_RETRY_DELAY_MS;
-        log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Waiting ${delay / 1000}s then syncing...`);
-        await new Promise((r) => setTimeout(r, delay));
-        await sync();
-        try {
-          const challengeResult = await consume({ accountId: gameAccountAddress, notes: [challengeNoteId] });
-          log(`Challenge consume succeeded! TX: ${JSON.stringify(challengeResult)}`);
-          consumedNoteIds.current.add(challengeNoteId);
-          break;
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          log(`[attempt ${attempt}/${CONSUME_MAX_RETRIES}] Challenge consume failed: ${msg}`);
-          if (attempt === CONSUME_MAX_RETRIES) throw err;
-        }
-      }
-
-      // Step 5: Send accept note to joiner directly (no wallet popup)
-      log("Building accept note → joiner account...");
-      const joinerHex = accountIdHexFromU64s(joinerPrefix.asInt(), joinerSuffix.asInt());
-      const joinerId = AccountId.fromHex(joinerHex);
-      const joinerAddr = Address.fromAccountId(joinerId).toBech32(NetworkId.testnet());
-      const { note: acceptNote } = buildNote(
-        acceptPkg,
-        buildHandshakeInputs(challengeGameId, gameAccountId.prefix(), gameAccountId.suffix(), commitment),
-        joinerId,
-        gameAccountId,
-        gameAccountAddress,
-      );
-      log("Submitting accept note directly (no wallet popup)...");
-      await runExclusive(() =>
-        submitNoteDirect([acceptNote], gameAccountId, client),
-      );
-
-      log("=== GAME READY ===");
-      setOpponentAddress(joinerAddr);
-      setStage("ready");
-      refetchGame();
-      refetchNotes();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log(`Consume FAILED: ${msg}`);
-      setError(msg);
-    } finally {
-      consumingRef.current = false;
-    }
-  }, [
-    gameAccountAddress,
-    walletAddress,
-    requestTransaction,
-    pendingNotes,
-    consume,
-    sync,
-    refetchGame,
-    refetchNotes,
-  ]);
-
-  // Detect opponent from game account storage
-  useEffect(() => {
-    if (stage !== "waiting-for-opponent" || !gameAccount) return;
-
-    const opponent = gameAccount.storage().getItem(SLOT_OPPONENT);
-    if (!opponent) {
-      log("Storage check: SLOT_OPPONENT not found");
-      return;
-    }
-
-    const values = opponent.toU64s();
-    log(`Storage SLOT_OPPONENT: [${Array.from(values, (v) => v.toString()).join(", ")}]`);
-
-    // opponent slot: [prefix, suffix, hits, shots]
-    // If prefix is non-zero, an opponent has connected
-    if (values[0] === 0n) {
-      log("Opponent slot prefix is 0 — no opponent yet.");
-      return;
-    }
-
-    log("=== OPPONENT DETECTED IN STORAGE ===");
-    // Don't auto-trigger handshake — consumeNotes handles the full flow.
-    // Just log and stop polling.
-  }, [stage, gameAccount]);
-
-  return {
-    startGame,
-    consumeNotes,
-    consumableNoteCount: pendingNotes.length,
-    isConsuming,
-    stage,
-    error,
-    gameAccountAddress,
-    opponentAddress,
-    walletConnected: connected,
-  };
+  return { startGame, stage, status, error, gameAccountAddress, opponentAddress, commitment };
 }

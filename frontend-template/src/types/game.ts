@@ -24,6 +24,10 @@ export interface GameState {
   expectedTurn: number;
   shipsHitCount: number;
   totalShotsReceived: number;
+  /** reveal_status[0]: this account has sent and marked its reveal */
+  myRevealed: number;
+  /** reveal_status[1]: the opponent's reveal was verified */
+  opponentVerified: number;
 }
 
 export interface BoardCell {

@@ -1,11 +1,11 @@
-# Miden Agentic Template
+# Miden Battleship
 
-This monorepo contains two Miden development templates as git submodules:
+This monorepo contains the two halves of the Battleship dApp:
 
-- `project-template/` -- Miden smart contracts (Rust SDK). Account components, note scripts, transaction scripts, and integration tests.
-- `frontend-template/` -- Miden web frontend (React + TypeScript + @miden-sdk/react). Browser-based UI that interacts with Miden contracts.
+- `project-template/` -- Miden contracts written in Miden Assembly (`contracts/masm/`) plus a Rust integration crate (`integration/`) with MockChain tests, the testnet validation binary and the CLI. Uses `miden-client` 0.17.2, `miden-testing` 0.17.1, `miden-protocol` 0.17.1 and `miden-standards` 0.17.1 on Rust 1.98.1.
+- `frontend-template/` -- Miden web frontend (React 19 + TypeScript + Vite 6 + `@miden-sdk/react` 0.17.0 / `@miden-sdk/miden-sdk` 0.17.1). It imports the same MASM sources and compiles them in the browser.
 
-Each sub-template has its own CLAUDE.md with detailed instructions, skills for domain-specific patterns, and hooks for automated verification. These load automatically when you start working in either directory.
+Each half has its own CLAUDE.md with detailed instructions, skills for domain-specific patterns, and hooks for automated verification. These load automatically when you start working in either directory.
 
 ## Agent Rules
 
@@ -38,86 +38,96 @@ Each sub-template has its own CLAUDE.md with detailed instructions, skills for d
 
 ## Development Workflow
 
-**Contracts first, validate against local node, then frontend.** Frontend work is gated on local-node validation passing.
+**Contracts first, validate on testnet, then frontend.** Frontend work is gated on the testnet validation binary passing.
 
-1. Build smart contracts in `project-template/`
-   - Write account components, note scripts, and tx scripts in `project-template/contracts/`
-   - Contracts compile to `.masp` package files
+1. Write or change the contracts in `project-template/contracts/masm/`
+   - One account component (`battleship_account.masm`), five note scripts, three transaction scripts under `scripts/`
+   - There is no build step: `BattleshipScripts::compile()` (Rust) and `ContractCompiler` (browser) assemble the sources at runtime with `CodeBuilder`
+   - Quick assemble check: `cd project-template && cargo test -p integration --release --lib all_masm_compiles`
 
 2. Validate with MockChain tests
-   - Write and run MockChain integration tests in `project-template/integration/tests/`
-   - Validate state transitions, note lifecycle, and expected outputs
-   - Exit criteria: all MockChain tests pass with explicit assertions
+   - Tests live in `project-template/integration/tests/`; the shared harness is `tests/common/mod.rs` (`Game`)
+   - The chain charges fees (`verification_base_fee`), so the `NoAuth` fee-payment path is exercised like on testnet
+   - Failure tests assert the exact MASM error message with `assert_masm_error`
+   - Exit criteria: `cargo test -p integration --release` passes (31 tests)
 
-3. Local-node validation **(GATE -- must pass before frontend)**
-   - Write Rust client binaries in `project-template/integration/src/bin/` that exercise the full contract flow against a local Miden node
-   - Start local node: `miden-node bundled start --data-directory local-node-data --rpc.url http://0.0.0.0:57291`
-   - Run: `cd project-template && cargo run --bin validate_local --release`
-   - Verify: transaction success/failure paths, state transitions, note lifecycle, clean node logs
-   - See the `local-node-validation` skill for the full checklist and setup guide
-   - Exit criteria: all state assertions pass, node logs are clean
+3. Testnet validation **(GATE -- must pass before frontend)**
+   - `cd project-template && cargo run --bin validate_testnet --release`
+   - Plays a full game between two independent clients (own store + keystore each), funds both accounts from the public faucet and asserts storage after every step; ~8–9 minutes
+   - There is no local-node step: `miden-node` 0.17 has no `bundled` mode. See the `local-node-validation` skill for the testnet checklist
+   - Exit criteria: the binary prints `DONE: both accounts COMPLETE`
 
-4. Copy artifacts and deploy
-   - Deploy contracts to testnet using integration binaries
-   - Copy `.masp` files from `project-template/masm-output/` (or the contract's `target/` directory) into `frontend-template/public/packages/`
-   - The frontend loads these at runtime via the Miden SDK
-
-5. Build the frontend in `frontend-template/`
-   - React components use `@miden-sdk/react` hooks to interact with contracts
-   - Mirror the validated Rust binary flow as closely as possible
+4. Build the frontend in `frontend-template/`
+   - The MASM sources are imported with `?raw` through the `@masm` Vite alias (`../project-template/contracts/masm`); nothing is copied or deployed
+   - `src/lib/game.ts` mirrors `validate_testnet.rs` step for step; hooks and components sit on top of it
    - TDD workflow: write tests first, then implement
-   - Automated hooks verify type safety and test coverage on every edit
+   - Automated hooks verify type safety and affected tests on every edit
 
 ## Which Directory to Work In
 
 | Task | Directory |
 |------|-----------|
-| Write or edit smart contracts | `project-template/contracts/` |
-| Write or edit integration tests | `project-template/integration/tests/` |
-| Validate contracts against local node | `project-template/integration/src/bin/` |
-| Deploy contracts to testnet | `project-template/integration/src/bin/` |
+| Write or edit contracts (MASM) | `project-template/contracts/masm/` |
+| Change storage layout, note layouts or compilation | `project-template/integration/src/battleship.rs` (and `frontend-template/src/config.ts`, `src/lib/contracts.ts`) |
+| Write or edit MockChain tests | `project-template/integration/tests/` |
+| Validate contracts on testnet / play from the terminal | `project-template/integration/src/bin/` |
 | Write or edit frontend components | `frontend-template/src/` |
-| Write or edit frontend tests | `frontend-template/src/__tests__/` |
+| Write or edit frontend tests | `frontend-template/src/**/__tests__/` |
 
 ## Automated Verification
 
 Hooks run automatically on every file edit:
-- Editing files in `project-template/contracts/` triggers `cargo miden build` on the modified contract
 - Editing files in `frontend-template/src/` triggers TypeScript type checking and affected test runs
+- `project-template/.claude/hooks/build-contracts.sh` predates the MASM migration (it looks for a `Cargo.toml` next to the edited file) and is a no-op for `.masm` edits; run the MockChain tests instead
 
-On task completion, a full verification runs: contract integration tests + frontend tests + typecheck + build.
+On task completion, run the full verification yourself: `cargo test -p integration --release`, then `yarn test`, `yarn lint` and `yarn build` in `frontend-template/`.
 
 ## Quick Reference
 
-**Build a contract:**
+**Assemble all MASM:**
 ```
-cargo miden build --manifest-path project-template/contracts/<name>/Cargo.toml --release
+cd project-template && cargo test -p integration --release --lib all_masm_compiles
 ```
 
-**Run contract integration tests:**
+**Run contract tests (MockChain):**
 ```
 cd project-template && cargo test -p integration --release
 ```
 
-**Start local Miden node:**
+**Cycle counts per transaction:**
 ```
-cd project-template && miden-node bundled start --data-directory local-node-data --rpc.url http://0.0.0.0:57291
-```
-
-**Run local-node validation:**
-```
-cd project-template && cargo run --bin validate_local --release
+cd project-template && cargo test -p integration --release --test cycle_benchmark_test -- --nocapture
 ```
 
-**Start frontend dev server:**
+**Testnet validation (full game, two clients):**
 ```
-cd frontend-template && yarn dev
+cd project-template && cargo run --bin validate_testnet --release
 ```
 
-**Run frontend tests:**
+**Interactive CLI (one terminal per player):**
 ```
-cd frontend-template && npx vitest --run
+cd project-template && cargo run --bin battleship_cli --release -- --player <name> --role challenger|acceptor --game-id <id> [--opponent <bech32>]
 ```
+
+**Frontend:**
+```
+cd frontend-template && yarn dev      # dev server on http://localhost:5173
+cd frontend-template && yarn test     # vitest (54 tests)
+cd frontend-template && yarn build    # tsc -b && vite build
+cd frontend-template && yarn lint
+```
+
+## Fees and Funding
+
+Testnet 0.17 charges every transaction a fee in USDCx (the chain's fee asset, 6 decimals). Game accounts are public `NoAuth` accounts with a `BasicWallet`; they are funded from the public faucet HTTP API (`https://faucet-api.testnet.miden.io`: `GET /pow`, solve a SHA-256 proof of work, `GET /get_tokens`; at most 10,000 base units per claim). The first transaction of a fresh account consumes the funding P2ID note and thereby deploys the account. A transaction costs ~105 base units; a full game ~4,200 per account. The Rust helpers top up below `MIN_FEE_BALANCE`, the frontend below `FEE_TOP_UP_THRESHOLD` (`src/config.ts`).
+
+## Pitfalls
+
+- **wasm-bindgen moves handles passed by value.** A `Felt`/`Word`/`Note`/component handle passed into a `FeltArray`, `Word.newFromFelts`, a builder or the client is consumed. Keep values as `bigint[]` and create fresh handles at the point of use (`felts()` in `src/lib/notes.ts`); read `note.id()` before handing the note over; `ContractCompiler` returns a fresh component/script per call.
+- **No Poseidon2 hash in the web SDK.** The setup script therefore takes an arbitrary advice-map key as its argument (random word in the browser, the payload's sequential hash in Rust); the commitment is an opaque word.
+- **One client per player.** A client tracking both game accounts never sees a component-created note (the result note) from one account as an input note of the other. The validation binary and the CLI use one store + keystore per player; two browser profiles for the frontend.
+- **`MidenProvider` never initializes behind a disconnected signer provider.** The frontend uses no signer provider at all (`src/providers.tsx`).
+- **Cycle counts** (MockChain, `cycle_benchmark_test`): setup ~31k, shot ~18k, publish ~11k, consume handshake ~14k; all 2^14–2^15 traces. Remote proving takes tens of seconds; the clients use a 120 s (browser) / 300 s (Rust) prover timeout.
 
 ## Post-Project Feedback
 
