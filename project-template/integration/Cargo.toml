@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 miden-client = { version = "0.17.2", features = ["tonic", "testing"] }
+blake3 = "1"
 miden-client-sqlite-store = "0.17.2"
 miden-standards = { version = "0.17.1", features = ["testing"] }
 miden-testing = "0.17.1"

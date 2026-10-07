@@ -71,16 +71,13 @@ async fn stake_rejects_defeat_from_wrong_game() -> Result<()> {
     let expiry = game.now() + STAKE_EXPIRY_DELTA;
     let fee_faucet = game.chain.fee_faucet_id();
     let asset = miden_client::asset::FungibleAsset::new(fee_faucet, STAKE)?.into();
-    let bogus = make_stake_note(
-        &game.scripts,
-        me.wallet,
-        c,
-        wallet_a,
-        a,
-        expiry,
-        asset,
-        serial(999),
-    )?;
+    let parties = StakeParties {
+        my_wallet: me.wallet,
+        my_game: c,
+        opp_wallet: wallet_a,
+        opp_game: a,
+    };
+    let bogus = make_stake_note(&game.scripts, parties, expiry, asset, serial(999))?;
     let account = game.chain.committed_account(me.wallet)?.clone();
     let interface = account.code().interface(me.wallet);
     let script = miden_standards::tx_script::SendNotesTransactionScript::new(

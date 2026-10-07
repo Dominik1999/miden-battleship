@@ -538,17 +538,29 @@ pub fn stake_storage(
     ]
 }
 
+/// The four accounts a stake note binds.
+#[derive(Debug, Clone, Copy)]
+pub struct StakeParties {
+    pub my_wallet: AccountId,
+    pub my_game: AccountId,
+    pub opp_wallet: AccountId,
+    pub opp_game: AccountId,
+}
+
 /// Builds a stake note created by `my_wallet`, holding `asset`, tagged for the opponent's wallet.
 pub fn make_stake_note(
     scripts: &BattleshipScripts,
-    my_wallet: AccountId,
-    my_game: AccountId,
-    opp_wallet: AccountId,
-    opp_game: AccountId,
+    parties: StakeParties,
     expiry: u64,
     asset: Asset,
     serial_num: Word,
 ) -> Result<Note> {
+    let StakeParties {
+        my_wallet,
+        my_game,
+        opp_wallet,
+        opp_game,
+    } = parties;
     let storage = NoteStorage::new(stake_storage(
         my_wallet, my_game, opp_wallet, opp_game, expiry,
     ))
@@ -918,5 +930,35 @@ mod tests {
         for encoded in 0..4 {
             assert_eq!(ShotResult::decode(encoded).encode(), encoded);
         }
+    }
+}
+
+/// Message of the `claim_forfeit` deadline assertion (mirrors battleship_account.masm).
+pub const ERR_FORFEIT_TOO_EARLY: &str = "claim_forfeit: the deadline has not passed";
+
+/// The felt a MASM `assert.err="<message>"` aborts with: the first 8 bytes of `blake3(message)`,
+/// little-endian. A client without the source manager prints only this code.
+pub fn masm_error_code(message: &str) -> u64 {
+    let digest = blake3::hash(message.as_bytes());
+    u64::from_le_bytes(digest.as_bytes()[..8].try_into().expect("8 bytes"))
+}
+
+/// Whether an error chain names the MASM message, either verbatim or by its error code.
+pub fn is_masm_error(err: &anyhow::Error, message: &str) -> bool {
+    let text = format!("{err:#}");
+    text.contains(message) || text.contains(&masm_error_code(message).to_string())
+}
+
+#[cfg(test)]
+mod isc_tests {
+    use super::*;
+
+    /// Prints the initial storage commitment so the frontend's value can be compared
+    /// (`cargo test -p integration --release --lib print_init_storage_commitment -- --nocapture`).
+    #[test]
+    fn print_init_storage_commitment() {
+        let isc = init_storage_commitment();
+        let values: Vec<u64> = isc.iter().map(|f| f.as_canonical_u64()).collect();
+        println!("INIT_STORAGE_COMMITMENT {values:?} {}", isc.to_hex());
     }
 }

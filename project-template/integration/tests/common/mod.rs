@@ -566,16 +566,13 @@ impl Game {
         let fee_faucet = self.chain.fee_faucet_id();
         let asset = FungibleAsset::new(fee_faucet, STAKE)?.into();
         let serial = self.fresh_serial();
-        let note = make_stake_note(
-            &self.scripts,
-            me.wallet,
-            me.id,
+        let parties = StakeParties {
+            my_wallet: me.wallet,
+            my_game: me.id,
             opp_wallet,
             opp_game,
-            expiry,
-            asset,
-            serial,
-        )?;
+        };
+        let note = make_stake_note(&self.scripts, parties, expiry, asset, serial)?;
         let account = self.chain.committed_account(me.wallet)?.clone();
         let interface = account.code().interface(me.wallet);
         let script =
